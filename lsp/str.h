@@ -8,7 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
-#include "fileuri.h"
+#include "uri.h"
 
 #ifndef _MSC_VER
 #include <strings.h>
@@ -21,7 +21,7 @@ struct TransparentHash{
 	std::size_t operator()(const char* str) const{ return std::hash<std::string_view>{}(str); }
 	std::size_t operator()(std::string_view str) const{ return std::hash<std::string_view>{}(str); }
 	std::size_t operator()(const std::string& str) const{ return std::hash<std::string_view>{}(str); }
-	std::size_t operator()(const FileURI& uri) const{ return std::hash<std::string_view>{}(uri.path()); }
+	std::size_t operator()(const URI& uri) const{ return std::hash<std::string_view>{}(uri.path()); }
 };
 
 struct CaseInsensitiveHash{
@@ -45,7 +45,7 @@ struct CaseInsensitiveHash{
 		return (*this)(std::string_view{str});
 	}
 
-	std::size_t operator()(const FileURI& uri) const
+	std::size_t operator()(const URI& uri) const
 	{
 		return (*this)(std::string_view{uri.path()});
 	}
@@ -74,14 +74,14 @@ struct CaseInsensitiveEqual{
 		return (*this)(std::string_view{s1}, std::string_view{s2});
 	}
 
-	std::size_t operator()(const FileURI& u1, const FileURI& u2) const
+	std::size_t operator()(const URI& u1, const URI& u2) const
 	{
 		return (*this)(std::string_view{u1.path()}, std::string_view{u2.path()});
 	}
 };
 
 template<typename StringType>
-concept CanBeStringMapKey = std::same_as<StringType, std::string> || std::same_as<StringType, std::string_view> || std::same_as<StringType, FileURI>;
+concept CanBeStringMapKey = std::same_as<StringType, std::string> || std::same_as<StringType, std::string_view> || std::same_as<StringType, URI>;
 
 /*
  * Unordered map and set types with that allow for faster lookup via string_view

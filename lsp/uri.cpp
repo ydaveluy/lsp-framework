@@ -1,4 +1,4 @@
-#include "fileuri.h"
+#include "uri.h"
 
 #include <cctype>
 #include <charconv>
@@ -9,7 +9,7 @@
 
 namespace lsp{
 
-std::string FileURI::toString() const
+std::string URI::toString() const
 {
 #ifdef _WIN32
 	std::filesystem::path path{m_path};
@@ -23,7 +23,7 @@ std::string FileURI::toString() const
 	return Scheme + encode(m_path);
 }
 
-std::string FileURI::fromString(std::string_view str)
+std::string URI::fromString(std::string_view str)
 {
 	str = str::trimView(str);
 
@@ -36,7 +36,7 @@ std::string FileURI::fromString(std::string_view str)
 	return decode(str);
 }
 
-std::string FileURI::encode(std::string_view decoded)
+std::string URI::encode(std::string_view decoded)
 {
 	std::string encoded;
 	encoded.reserve(decoded.size());
@@ -59,7 +59,7 @@ std::string FileURI::encode(std::string_view decoded)
 	return encoded;
 }
 
-std::string FileURI::decode(std::string_view encoded)
+std::string URI::decode(std::string_view encoded)
 {
 	std::string decoded;
 

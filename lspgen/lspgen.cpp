@@ -838,7 +838,7 @@ R"(#pragma once
 #include <variant>
 #include <string_view>
 #include <lsp/str.h>
-#include <lsp/fileuri.h>
+#include <lsp/uri.h>
 #include <lsp/nullable.h>
 #include <lsp/json/json.h>
 #include <lsp/serialization.h>
@@ -1795,8 +1795,8 @@ const CppGenerator::CppBaseType CppGenerator::s_baseTypeMapping[] =
 	{"int", "int", "int", "int"},
 	{"uint", "uint", "uint", "uint"},
 	{"double", "double", "double", "double"},
-	{"FileURI", "FileURI", "const FileURI&", "const FileURI&"},
-	{"FileURI", "FileURI", "const FileURI&", "const FileURI&"},
+	{"URI", "URI", "const URI&", "const URI&"},
+	{"URI", "URI", "const URI&", "const URI&"},
 	{"std::string", "std::string_view", "const std::string&", "const std::string&"},
 	{"std::nullptr_t", "std::nullptr_t", "std::nullptr_t", "std::nullptr_t"}
 };

@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <lsp/str.h>
 #include <lsp/util.h>
-#include <lsp/fileuri.h>
+#include <lsp/uri.h>
 #include <lsp/json/json.h>
 #include <lsp/nullable.h>
 
@@ -65,7 +65,7 @@ inline json::Any toJson(float i){ return i; }
 inline json::Any toJson(double i){ return i; }
 inline json::Any toJson(std::string&& v){ return std::move(v); }
 inline json::Any toJson(std::string_view v){ return json::String{v}; }
-inline json::Any toJson(const FileURI& uri){ return uri.toString(); }
+inline json::Any toJson(const URI& uri){ return uri.toString(); }
 inline json::Any toJson(json::Any&& v){ return std::move(v); }
 inline json::Any toJson(json::Object&& v){ return std::move(v); }
 inline json::Any toJson(json::Array&& v){ return std::move(v); }
@@ -119,7 +119,7 @@ struct MapKeyType{
 };
 
 template<>
-struct MapKeyType<FileURI>{
+struct MapKeyType<URI>{
 	using Type = std::string;
 };
 
@@ -130,7 +130,7 @@ const typename MapKeyType<T>::Type& mapKey(const T& u)
 }
 
 template<>
-inline const std::string& mapKey(const FileURI& uri)
+inline const std::string& mapKey(const URI& uri)
 {
 	return uri.path();
 }
@@ -206,7 +206,7 @@ inline void fromJson(json::Any&& json, unsigned long long& value){ value = stati
 inline void fromJson(json::Any&& json, float& value){ value = static_cast<float>(json.number()); }
 inline void fromJson(json::Any&& json, double& value){ value = static_cast<double>(json.number()); }
 inline void fromJson(json::Any&& json, std::string& value){ value = std::move(json.string()); }
-inline void fromJson(json::Any&& json, FileURI& value){ value = FileURI{json.string()}; }
+inline void fromJson(json::Any&& json, URI& value){ value = URI{json.string()}; }
 inline void fromJson(json::Any&& json, json::Any& v){ v = std::move(json); }
 inline void fromJson(json::Any&& json, json::Object& v){ v = std::move(json.object()); }
 inline void fromJson(json::Any&& json, json::Array& v){ v = std::move(json.array()); }

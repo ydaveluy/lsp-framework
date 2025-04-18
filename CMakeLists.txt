@@ -33,7 +33,7 @@ set(LSP_HEADERS
 	# lsp
 	connection.h
 	error.h
-	fileuri.h
+	uri.h
 	messagebase.h
 	messagedispatcher.h
 	messagehandler.h
@@ -57,7 +57,7 @@ set(LSP_SOURCES
 	messagedispatcher.cpp
 	requesthandler.cpp
 	str.cpp
-	fileuri.cpp
+	uri.cpp
 	# io
 	io/standardio.cpp
 	# json
