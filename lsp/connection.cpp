@@ -24,6 +24,8 @@
 	#elif defined(_WIN32)
 		#define WIN32_LEAN_AND_MEAN
 		#include <Windows.h>
+	#else
+		#include <cstdio> // stderr expands to a macro, so <cstdio> has to be included here
 	#endif
 #endif
 
@@ -42,7 +44,7 @@ void debugLogMessageJson([[maybe_unused]] const std::string& messageType, [[mayb
 #elif defined(_WIN32)
 	OutputDebugStringA((messageType + ": " + lsp::json::stringify(json, true) + '\n').c_str());
 #elif defined(__linux__) || defined(__HAIKU__)
-    fprintf(stderr, "%s\n",  (messageType + ": " + lsp::json::stringify(json, true)).c_str());
+	std::fprintf(stderr, "%s\n",  (messageType + ": " + lsp::json::stringify(json, true)).c_str());
 #endif
 }
 #endif
@@ -66,6 +68,8 @@ bool equalCaseInsensitive(std::string_view lhs, std::string_view rhs)
 			       std::tolower(static_cast<unsigned char>(b));
 		});
 }
+
+constexpr std::string_view DefaultContentType{"application/vscode-jsonrpc; charset=utf-8"};
 
 void verifyContentType(std::string_view contentType)
 {
@@ -146,7 +150,7 @@ private:
 
 struct Connection::MessageHeader{
 	std::size_t contentLength = 0;
-	std::string contentType   = "application/vscode-jsonrpc; charset=utf-8";
+	std::string contentType; // empty means DefaultContentType
 };
 
 Connection::Connection(io::Stream& stream)
@@ -173,7 +177,7 @@ Connection::Message Connection::readMessage()
 		readLock.unlock();
 
 		// Verify only after reading the entire message so no partially unread message is left in the stream
-		verifyContentType(header.contentType);
+		verifyContentType(header.contentType.empty() ? DefaultContentType : std::string_view{header.contentType});
 
 		auto json = json::parse(content);
 #if LSP_MESSAGE_DEBUG_LOG
@@ -282,6 +286,7 @@ void Connection::readNextMessageHeaderField(MessageHeader& header, InputReader& 
 		throw ConnectionError{"Connection lost"};
 
 	std::string lineData;
+	lineData.reserve(64);
 
 	while(reader.peek() != '\r')
 	{
@@ -301,16 +306,41 @@ void Connection::readNextMessageHeaderField(MessageHeader& header, InputReader& 
 
 void Connection::writeMessageData(const std::string& content)
 {
+	// The header goes into a stack buffer and the payload is written as it is:
+	// concatenating them copied the whole message on every write.
+	char        buffer[160];
+	std::size_t size = 0;
+
+	// The appends below are unchecked, so the buffer must hold the longest
+	// header the fixed parts plus a 20-digit content length can produce.
+	static_assert(sizeof(buffer) >=
+	              std::string_view{"Content-Length: "}.size() + 20 +
+	              std::string_view{"\r\nContent-Type: "}.size() +
+	              DefaultContentType.size() +
+	              std::string_view{"\r\n\r\n"}.size(),
+	              "Message header buffer is too small for DefaultContentType");
+
+	const auto append = [&](std::string_view part)
+	{
+		std::memcpy(buffer + size, part.data(), part.size());
+		size += part.size();
+	};
+
+	append("Content-Length: ");
+	size = static_cast<std::size_t>(std::to_chars(buffer + size, buffer + sizeof(buffer), content.size()).ptr - buffer);
+	append("\r\nContent-Type: ");
+	append(DefaultContentType);
+	append("\r\n\r\n");
+
 	std::lock_guard lock{m_writeMutex};
-	MessageHeader header{content.size()};
-	const auto messageStr = messageHeaderString(header) + content;
-	m_stream.write(messageStr.data(), messageStr.size());
+	m_stream.write(buffer, size);
+	m_stream.write(content.data(), content.size());
 }
 
 std::string Connection::messageHeaderString(const MessageHeader& header)
 {
 	return "Content-Length: " + std::to_string(header.contentLength) + "\r\n" +
-	       "Content-Type: " + header.contentType + "\r\n\r\n";
+	       "Content-Type: " + (header.contentType.empty() ? std::string{DefaultContentType} : header.contentType) + "\r\n\r\n";
 }
 
 } // namespace lsp
