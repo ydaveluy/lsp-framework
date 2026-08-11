@@ -8,15 +8,15 @@ constexpr std::string_view ProtocolVersion{"2.0"};
 
 void verifyProtocolVersion(const json::Object& json)
 {
-	if(!json.contains("jsonrpc"))
+	const auto* const jsonrpc = json.find("jsonrpc");
+
+	if(!jsonrpc)
 		throw ProtocolError{"jsonrpc property is missing"};
 
-	const auto& jsonrpc = json.get("jsonrpc");
-
-	if(!jsonrpc.isString())
+	if(!jsonrpc->isString())
 		throw ProtocolError{"jsonrpc property expected to be a string"};
 
-	if(jsonrpc.string() != ProtocolVersion)
+	if(jsonrpc->string() != ProtocolVersion)
 		throw ProtocolError{"Invalid or unsupported jsonrpc version"};
 }
 
@@ -41,18 +41,16 @@ Request requestFromJson(json::Object& json)
 	Request request;
 	request.method = std::move(json.get("method").string());
 
-	if(json.contains("id"))
-		request.id = messageIdFromJson(json.get("id"));
+	if(auto* const id = json.find("id"))
+		request.id = messageIdFromJson(*id);
 
-	if(json.contains("params"))
+	if(auto* const params = json.find("params"))
 	{
-		auto& params = json.get("params");
-
-		if(params.isObject())
-			request.params = std::move(params.object());
-		else if(params.isArray())
-			request.params = std::move(params.array());
-		else if(!params.isNull()) // Be lenient and allow null params even though it is not allowed by jsonrpc 2.0
+		if(params->isObject())
+			request.params = std::move(params->object());
+		else if(params->isArray())
+			request.params = std::move(params->array());
+		else if(!params->isNull()) // Be lenient and allow null params even though it is not allowed by jsonrpc 2.0
 			throw ProtocolError{"Params type must be object or array"};
 	}
 
@@ -65,40 +63,39 @@ Response responseFromJson(json::Object& json)
 
 	Response response;
 
-	if(json.contains("id"))
-		response.id = messageIdFromJson(json.get("id"));
+	if(auto* const id = json.find("id"))
+		response.id = messageIdFromJson(*id);
 
-	if(json.contains("result"))
-		response.result = std::move(json.get("result"));
+	if(auto* const result = json.find("result"))
+		response.result = std::move(*result);
 
-	if(json.contains("error"))
+	if(auto* const error = json.find("error"))
 	{
-		auto& error         = json.get("error");
-		auto& errorObj      = error.object();
+		auto& errorObj      = error->object();
 		auto& responseError = response.error.emplace();
 
-		if(!errorObj.contains("code"))
+		const auto* const errorCode = errorObj.find("code");
+
+		if(!errorCode)
 			throw ProtocolError{"Response error is missing the error code"};
 
-		const auto& errorCode = errorObj.get("code");
-
-		if(!errorCode.isNumber())
+		if(!errorCode->isNumber())
 			throw ProtocolError{"Response error code must be a number"};
 
-		responseError.code = static_cast<json::Integer>(errorCode.number());
+		responseError.code = static_cast<json::Integer>(errorCode->number());
 
-		if(!errorObj.contains("message"))
+		auto* const errorMessage = errorObj.find("message");
+
+		if(!errorMessage)
 			throw ProtocolError{"Response error is missing the error message"};
 
-		auto& errorMessage = errorObj.get("message");
-
-		if(!errorMessage.isString())
+		if(!errorMessage->isString())
 			throw ProtocolError{"Response error message must be a string"};
 
-		responseError.message = std::move(errorMessage.string());
+		responseError.message = std::move(errorMessage->string());
 
-		if(errorObj.contains("data"))
-			responseError.data = errorObj.get("data");
+		if(auto* const data = errorObj.find("data"))
+			responseError.data = std::move(*data);
 	}
 
 	if((response.result.has_value() && response.error.has_value()) || (!response.result.has_value() && !response.error.has_value()))
@@ -165,7 +162,7 @@ json::Object messageToJson(Message&& message)
 			errorJson["message"] = std::move(responseError.message);
 
 			if(responseError.data.has_value())
-				json["data"] = std::move(*responseError.data);
+				errorJson["data"] = std::move(*responseError.data);
 
 			json["error"] = std::move(errorJson);
 		}

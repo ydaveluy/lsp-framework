@@ -390,8 +390,13 @@ template<typename K, typename T>
 json::Value toJson(StrMap<K, T>&& map)
 {
 	json::Object result;
+	auto& resultMap = result.keyValueMap();
+	resultMap.reserve(map.size());
+
+	// append, not operator[]: map keys are unique already, so this skips the
+	// lookup and moves a by-value mapKey() (Uri) straight in.
 	for(auto&& [k, v] : map)
-		result[impl::mapKey(k)] = toJson(std::move(v));
+		resultMap.append(json::String{impl::mapKey(k)}) = toJson(std::move(v));
 
 	return result;
 }
@@ -470,9 +475,12 @@ void fromJson(json::Value&& json, std::tuple<Args...>& value)
 template<typename K, typename T>
 void fromJson(json::Value&& json, StrMap<K, T>& value)
 {
-	auto& obj = json.object();
-	for(auto&& [k, v] : obj.keyValueMap())
-		fromJson(std::move(v), value[k]);
+	auto& objMap = json.object().keyValueMap();
+	value.reserve(objMap.size());
+
+	// The parser already allocated each key; move it instead of copying.
+	for(auto&& [k, v] : objMap)
+		fromJson(std::move(v), value[std::move(k)]);
 }
 
 template<typename T>
@@ -486,7 +494,7 @@ void fromJson(json::Value&& json, StrMap<Uri, T>& value)
 		auto uri = Uri::parse(k);
 
 		if(uri.isValid())
-			fromJson(std::move(v), value[Uri::parse(k)]);
+			fromJson(std::move(v), value[std::move(uri)]);
 	}
 }
 

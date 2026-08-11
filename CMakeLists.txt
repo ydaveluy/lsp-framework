@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 
 option(LSP_BUILD_EXAMPLES "Build the examples" OFF)
+option(LSP_BUILD_TESTS "Build the tests" OFF)
 option(LSP_INSTALL "Configure lsp install configuration" ON)
 set(LSP_METAMODEL_JSON ${CMAKE_CURRENT_SOURCE_DIR}/lspgen/metaModel.json CACHE FILEPATH "Path to the LSP meta model json passed to lspgen")
 
@@ -190,6 +191,19 @@ endif()
 
 if(WIN32)
 	target_link_libraries(lsp PUBLIC Ws2_32)
+endif()
+
+if(LSP_BUILD_TESTS)
+	enable_testing()
+	# The checks are assert based, so NDEBUG would turn a Release run into a no-op.
+	add_executable(LspRoundTripTest ${LSP_DIR}/tests/rpc_serialization_roundtrip.cpp)
+	target_link_libraries(LspRoundTripTest lsp)
+
+	if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+		target_compile_options(LspRoundTripTest PRIVATE -UNDEBUG)
+	endif()
+
+	add_test(NAME RoundTrip COMMAND LspRoundTripTest)
 endif()
 
 if(LSP_BUILD_EXAMPLES)
