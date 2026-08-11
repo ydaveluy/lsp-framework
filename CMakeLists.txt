@@ -4,9 +4,20 @@ project(lsp)
 
 # compiler flags
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED YES)
-set(CMAKE_CXX_EXTENSIONS NO)
+# Standalone builds at 20; an embedding consumer's standard is respected.
+#
+# EACH OF THE THREE IS ONLY SET WHEN NOBODY ELSE HAS: they are global
+# settings, and re-stating one here would silently override the value an
+# embedding consumer already chose.
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+	set(CMAKE_CXX_STANDARD 20)
+endif()
+if(NOT DEFINED CMAKE_CXX_STANDARD_REQUIRED)
+	set(CMAKE_CXX_STANDARD_REQUIRED YES)
+endif()
+if(NOT DEFINED CMAKE_CXX_EXTENSIONS)
+	set(CMAKE_CXX_EXTENSIONS NO)
+endif()
 
 option(LSP_BUILD_EXAMPLES "Build the examples" OFF)
 option(LSP_BUILD_TESTS "Build the tests" OFF)
@@ -14,24 +25,32 @@ option(LSP_INSTALL "Configure lsp install configuration" ON)
 set(LSP_METAMODEL_JSON ${CMAKE_CURRENT_SOURCE_DIR}/lspgen/metaModel.json CACHE FILEPATH "Path to the LSP meta model json passed to lspgen")
 
 
+# WARNINGS ARE THE DEVELOPER'S, LIKE THE SANITIZERS. A consumer that embeds
+# this project imposes its own set, so ours is only added when this project is
+# built top-level.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-	add_compile_options(/W4 /bigobj)
+	if(PROJECT_IS_TOP_LEVEL)
+		add_compile_options(/W4)
+	endif()
+	add_compile_options(/bigobj)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 	option(LSP_USE_SANITIZERS "Use address and undefined behavior sanitizers for Debug builds" OFF)
 
-	add_compile_options(
-		-Wall
-		-Wextra
-		-pedantic
-		-Wsign-conversion
-		-Wfloat-conversion
-	)
-
-	if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+	if(PROJECT_IS_TOP_LEVEL)
 		add_compile_options(
-			-Wimplicit-int-conversion
-			-Wimplicit-float-conversion
+			-Wall
+			-Wextra
+			-pedantic
+			-Wsign-conversion
+			-Wfloat-conversion
 		)
+
+		if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+			add_compile_options(
+				-Wimplicit-int-conversion
+				-Wimplicit-float-conversion
+			)
+		endif()
 	endif()
 
 	if(LSP_USE_SANITIZERS)
