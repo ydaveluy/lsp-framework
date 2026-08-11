@@ -273,6 +273,7 @@ private:
 		while(!atEnd() && (
 		      std::isalnum(static_cast<unsigned char>(*m_pos)) ||
 		      *m_pos == '-' ||
+		      *m_pos == '+' ||
 		      *m_pos == '.' ||
 		      *m_pos == 'e' ||
 		      *m_pos == 'E')
@@ -381,17 +382,16 @@ void stringifyImplementation(const Value& json, std::string& str, std::size_t in
 	}
 	else if(json.isDecimal())
 	{
-		auto numberStr = std::to_string(json.decimal());
-
-		for(std::size_t i = numberStr.size(); i > 2; --i)
-		{
-			if(numberStr[i] != '0' || numberStr[i - 1] == '.')
-				break;
-
-			numberStr.pop_back();
-		}
+		// to_string is printf %f: it fixes six decimals, so 1e-9 serializes as 0.
+		char       buffer[32];
+		const auto end       = std::to_chars(buffer, buffer + sizeof(buffer), json.decimal(), std::chars_format::general).ptr;
+		const auto numberStr = std::string_view(buffer, end);
 
 		str += numberStr;
+
+		// general format drops the fraction of an integral value; keep it a decimal.
+		if(numberStr.find_first_not_of("-0123456789") == std::string_view::npos)
+			str += ".0";
 	}
 	else if(json.isString())
 	{
