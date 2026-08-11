@@ -58,15 +58,15 @@ private:
 
 class Object{
 public:
-	using MapType = StrMap<String, Value>;
+	class MapType;
 
 	Object();
 	Object(const Object& other);
-	Object(Object&&) noexcept = default;
+	Object(Object&&) noexcept;
 	~Object();
 
 	Object& operator=(const Object& other);
-	Object& operator=(Object&& other) noexcept = default;
+	Object& operator=(Object&& other) noexcept;
 
 	[[nodiscard]] bool operator==(const Object& other) const;
 	[[nodiscard]] bool operator!=(const Object& other) const{ return !(*this == other); }
@@ -76,6 +76,7 @@ public:
 	[[nodiscard]] std::size_t size() const;
 	[[nodiscard]] bool empty() const;
 	[[nodiscard]] bool contains(std::string_view key) const;
+	void reserve(std::size_t count);
 	[[nodiscard]] Value& get(std::string_view key);
 	[[nodiscard]] const Value& get(std::string_view key) const;
 	[[nodiscard]] Value* find(std::string_view key);
@@ -164,12 +165,152 @@ private:
 };
 
 /*
+ * Object storage
+ *
+ * Flat and contiguous: a json object holds a handful of keys, and scanning
+ * them beats hashing plus a node allocation each. An index is built once a
+ * object grows past the threshold. Iteration order is insertion order.
+ */
+
+class Object::MapType{
+public:
+	using value_type     = std::pair<String, Value>;
+	using Storage        = std::vector<value_type>;
+	using iterator       = Storage::iterator;
+	using const_iterator = Storage::const_iterator;
+
+	MapType() = default;
+	MapType(const MapType& other) : m_entries{other.m_entries}{ reindex(); }
+	MapType(MapType&&) noexcept = default;
+	MapType& operator=(const MapType& other){ m_entries = other.m_entries; reindex(); return *this; }
+	MapType& operator=(MapType&&) noexcept = default;
+
+	[[nodiscard]] iterator begin(){ return m_entries.begin(); }
+	[[nodiscard]] iterator end(){ return m_entries.end(); }
+	[[nodiscard]] const_iterator begin() const{ return m_entries.begin(); }
+	[[nodiscard]] const_iterator end() const{ return m_entries.end(); }
+
+	[[nodiscard]] std::size_t size() const{ return m_entries.size(); }
+	[[nodiscard]] bool empty() const{ return m_entries.empty(); }
+	void reserve(std::size_t count){ m_entries.reserve(count); }
+
+	[[nodiscard]] iterator find(std::string_view key)
+	{
+		const auto idx = indexOf(key);
+		return idx == NoIndex ? m_entries.end() : m_entries.begin() + static_cast<std::ptrdiff_t>(idx);
+	}
+
+	[[nodiscard]] const_iterator find(std::string_view key) const
+	{
+		const auto idx = indexOf(key);
+		return idx == NoIndex ? m_entries.end() : m_entries.begin() + static_cast<std::ptrdiff_t>(idx);
+	}
+
+	[[nodiscard]] bool contains(std::string_view key) const{ return indexOf(key) != NoIndex; }
+
+	// Appends without looking the key up; the caller has to know it is absent.
+	Value& append(String&& key)
+	{
+		const auto* const oldData = m_entries.data();
+		m_entries.emplace_back(std::move(key), Value{});
+
+		if(m_entries.size() > IndexThreshold)
+		{
+			if(!m_index || m_entries.data() != oldData)
+				reindex();
+			else
+				m_index->emplace(std::string_view{m_entries.back().first}, m_entries.size() - 1);
+		}
+
+		return m_entries.back().second;
+	}
+
+	// Returns the value for key, default constructing an entry if there is none.
+	Value& emplace(std::string_view key)
+	{
+		if(const auto idx = indexOf(key); idx != NoIndex)
+			return m_entries[idx].second;
+
+		const auto* const oldData = m_entries.data();
+		m_entries.emplace_back(String{key}, Value{});
+
+		if(m_entries.size() > IndexThreshold)
+		{
+			if(!m_index || m_entries.data() != oldData)
+				reindex();
+			else
+				m_index->emplace(std::string_view{m_entries.back().first}, m_entries.size() - 1);
+		}
+
+		return m_entries.back().second;
+	}
+
+	[[nodiscard]] bool operator==(const MapType& other) const
+	{
+		if(m_entries.size() != other.m_entries.size())
+			return false;
+
+		for(const auto& [key, value] : m_entries)
+		{
+			const auto it = other.find(key);
+
+			if(it == other.end() || it->second != value)
+				return false;
+		}
+
+		return true;
+	}
+
+private:
+	static constexpr std::size_t IndexThreshold = 16;
+	static constexpr std::size_t NoIndex        = static_cast<std::size_t>(-1);
+
+	Storage                                             m_entries;
+	std::unique_ptr<StrMap<std::string_view, std::size_t>> m_index;
+
+	[[nodiscard]] std::size_t indexOf(std::string_view key) const
+	{
+		if(m_index)
+		{
+			const auto it = m_index->find(key);
+			return it == m_index->end() ? NoIndex : it->second;
+		}
+
+		for(std::size_t i = 0; i < m_entries.size(); ++i)
+		{
+			if(m_entries[i].first == key)
+				return i;
+		}
+
+		return NoIndex;
+	}
+
+	// The views point into m_entries, so this runs again after a reallocation.
+	void reindex()
+	{
+		if(m_entries.size() <= IndexThreshold)
+		{
+			m_index.reset();
+			return;
+		}
+
+		m_index = std::make_unique<StrMap<std::string_view, std::size_t>>();
+		m_index->reserve(m_entries.size());
+
+		for(std::size_t i = 0; i < m_entries.size(); ++i)
+			m_index->emplace(std::string_view{m_entries[i].first}, i);
+	}
+};
+
+/*
  * parse/stringify
  */
 
 Value       parse(std::string_view text);
 std::string stringify(const Value& json, bool format = false);
+void        stringify(const Value& json, std::string& str, bool format = false);
 std::string toStringLiteral(std::string_view str);
+void        appendStringLiteral(std::string& str, std::string_view value);
 std::string fromStringLiteral(std::string_view str);
 
 } // namespace lsp::json

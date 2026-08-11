@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <charconv>
 #include <iterator>
@@ -9,6 +10,43 @@
 
 namespace lsp::json{
 namespace{
+
+// isspace/isdigit/isalnum reach for the locale on every call; the parse loops
+// run per byte, so they read a table instead.
+enum CharClass : std::uint8_t{
+	ClassSpace = 1,
+	ClassDigit = 2,
+	ClassAlpha = 4
+};
+
+constexpr auto CharClasses = []
+{
+	std::array<std::uint8_t, 256> table{};
+
+	for(std::size_t i = 0; i < table.size(); ++i)
+	{
+		std::uint8_t flags = 0;
+
+		if(i == ' ' || i == '\t' || i == '\n' || i == '\r' || i == '\v' || i == '\f')
+			flags |= ClassSpace;
+
+		if(i >= '0' && i <= '9')
+			flags |= ClassDigit;
+
+		if((i >= 'a' && i <= 'z') || (i >= 'A' && i <= 'Z'))
+			flags |= ClassAlpha;
+
+		table[i] = flags;
+	}
+
+	return table;
+}();
+
+constexpr bool isClass(char c, std::uint8_t flags)
+{
+	return (CharClasses[static_cast<unsigned char>(c)] & flags) != 0;
+}
+
 
 constexpr std::string_view NullValueString{"null"};
 constexpr std::string_view TrueValueString{"true"};
@@ -79,12 +117,6 @@ public:
 			throw ParseError{"Trailing characters in json", currentTextOffset()};
 
 		return result;
-	}
-
-	void reset()
-	{
-		m_stateStack.clear();
-		m_pos = m_start;
 	}
 
 private:
@@ -162,10 +194,10 @@ private:
 		assert(currentState() == State::ObjectKey);
 
 		const char* keyPos = m_pos;
-		auto&       object = currentValue().object();
-		const auto  key    = parseString();
+		auto&       map    = currentValue().object().keyValueMap();
+		auto        key    = parseString();
 
-		if(object.contains(key))
+		if(map.find(key) != map.end())
 			throw ParseError{"Duplicate key '" + key + "'", textOffset(keyPos)};
 
 		skipWhitespace();
@@ -176,7 +208,7 @@ private:
 		++m_pos;
 
 		popState();
-		pushState(State::Value, object[key]);
+		pushState(State::Value, map.append(std::move(key)));
 	}
 
 	void handleArray()
@@ -235,7 +267,7 @@ private:
 
 	void skipWhitespace()
 	{
-		while(!atEnd() && std::isspace(static_cast<unsigned char>(*m_pos)))
+		while(!atEnd() && isClass(*m_pos, ClassSpace))
 			++m_pos;
 	}
 
@@ -244,25 +276,38 @@ private:
 		if(atEnd() || *m_pos != '\"')
 			throw ParseError{"String expected", currentTextOffset()};
 
-		const char* const stringStart = m_pos++;
-		auto              hasEscape   = false;
+		++m_pos;
+		const char* const contentStart = m_pos;
+		auto              hasEscape    = false;
 
 		for(;;)
 		{
 			if(atEnd() || *m_pos == '\n')
 				throw ParseError("Unmatched '\"'", currentTextOffset());
 
-			if(!hasEscape && *m_pos == '"')
-			{
-				++m_pos;
+			if(*m_pos == '"')
 				break;
+
+			if(*m_pos == '\\')
+			{
+				hasEscape = true;
+				++m_pos;
+
+				if(atEnd() || *m_pos == '\n')
+					throw ParseError("Unmatched '\"'", currentTextOffset());
 			}
 
-			hasEscape = !hasEscape && *m_pos == '\\';
 			++m_pos;
 		}
 
-		return fromStringLiteral(std::string_view(stringStart, m_pos));
+		const auto content = std::string_view(contentStart, m_pos);
+		++m_pos; // closing quote
+
+		// Most strings carry no escape: take the bytes as they are.
+		if(!hasEscape)
+			return String{content};
+
+		return fromStringLiteral(content);
 	}
 
 	Value parseNumber()
@@ -271,12 +316,10 @@ private:
 		bool isDecimal = false;
 
 		while(!atEnd() && (
-		      std::isalnum(static_cast<unsigned char>(*m_pos)) ||
+		      isClass(*m_pos, ClassDigit | ClassAlpha) ||
 		      *m_pos == '-' ||
 		      *m_pos == '+' ||
-		      *m_pos == '.' ||
-		      *m_pos == 'e' ||
-		      *m_pos == 'E')
+		      *m_pos == '.')
 		)
 		{
 			if(!isDecimal && (*m_pos == '.' || *m_pos == 'e' || *m_pos == 'E'))
@@ -312,7 +355,7 @@ private:
 	{
 		const char* idStart = m_pos;
 
-		while(!atEnd() && std::isalnum(static_cast<unsigned char>(*m_pos)))
+		while(!atEnd() && isClass(*m_pos, ClassDigit | ClassAlpha))
 			++m_pos;
 
 		auto identifier = std::string_view(idStart, m_pos);
@@ -334,10 +377,10 @@ private:
 		if(*m_pos == '\"')
 			return parseString();
 
-		if(std::isdigit(static_cast<unsigned char>(*m_pos)) || *m_pos == '-')
+		if(isClass(*m_pos, ClassDigit) || *m_pos == '-')
 			return parseNumber();
 
-		if(std::isalpha(static_cast<unsigned char>(*m_pos)))
+		if(isClass(*m_pos, ClassAlpha))
 			return parseIdentifier();
 
 		throw ParseError{"Unexpected token", currentTextOffset()};
@@ -395,7 +438,7 @@ void stringifyImplementation(const Value& json, std::string& str, std::size_t in
 	}
 	else if(json.isString())
 	{
-		str += toStringLiteral(json.string());
+		appendStringLiteral(str, json.string());
 	}
 	else if(json.isObject())
 	{
@@ -408,7 +451,7 @@ void stringifyImplementation(const Value& json, std::string& str, std::size_t in
 			str += listStart;
 			++indentLevel;
 			str += getIndent();
-			str += toStringLiteral(it->first);
+			appendStringLiteral(str, it->first);
 			str += keySep;
 			stringifyImplementation(it->second, str, indentLevel, format);
 			++it;
@@ -417,7 +460,7 @@ void stringifyImplementation(const Value& json, std::string& str, std::size_t in
 			{
 				str += valueSep;
 				str += getIndent();
-				str += toStringLiteral(it->first);
+				appendStringLiteral(str, it->first);
 				str += keySep;
 				stringifyImplementation(it->second, str, indentLevel, format);
 				++it;
@@ -503,6 +546,10 @@ Object::Object(const Object& other)
 {
 }
 
+Object::Object(Object&&) noexcept = default;
+Object& Object::operator=(Object&&) noexcept = default;
+// Defined here, not in the class: the defaulted move members destroy the old
+// pimpl, which needs MapType complete -- it is not, at the declaration.
 Object::~Object() = default;
 
 Object& Object::operator=(const Object& other)
@@ -531,12 +578,14 @@ bool Object::contains(std::string_view key) const
 	return m_map->contains(key);
 }
 
+void Object::reserve(std::size_t count)
+{
+	m_map->reserve(count);
+}
+
 Value& Object::operator[](std::string_view key)
 {
-	if(const auto it = m_map->find(key); it != m_map->end())
-		return it->second;
-
-	return m_map->insert({std::string(key), Value()}).first->second;
+	return m_map->emplace(key);
 }
 
 Value& Object::get(std::string_view key)
@@ -595,54 +644,62 @@ std::string stringify(const Value& json, bool format)
 	return str;
 }
 
+void stringify(const Value& json, std::string& str, bool format)
+{
+	stringifyImplementation(json, str, 0, format);
+}
+
+void appendStringLiteral(std::string& str, std::string_view value)
+{
+	str += '\"';
+
+	// Copy the runs between escapes whole instead of a byte at a time.
+	std::size_t runStart = 0;
+
+	for(std::size_t i = 0; i < value.size(); ++i)
+	{
+		const char        c  = value[i];
+		const char* const escape = [c]() -> const char*
+		{
+			switch(c)
+			{
+			case '\b': return "\\b";
+			case '\t': return "\\t";
+			case '\n': return "\\n";
+			case '\f': return "\\f";
+			case '\r': return "\\r";
+			case '\"': return "\\\"";
+			case '\\': return "\\\\";
+			default:   return nullptr;
+			}
+		}();
+
+		if(escape)
+		{
+			str += value.substr(runStart, i - runStart);
+			str += escape;
+			runStart = i + 1;
+		}
+		else if(static_cast<unsigned char>(c) < 0x20)
+		{
+			constexpr auto hexLookup = "0123456789ABCDEF";
+			str += value.substr(runStart, i - runStart);
+			str += "\\u00";
+			str += hexLookup[(static_cast<unsigned char>(c) >> 4) & 0xF];
+			str += hexLookup[c & 0xF];
+			runStart = i + 1;
+		}
+	}
+
+	str += value.substr(runStart);
+	str += '\"';
+}
+
 std::string toStringLiteral(std::string_view str)
 {
 	std::string result;
 	result.reserve(str.size() + 2);
-	result += '\"';
-
-	for(const char c : str)
-	{
-		switch(c)
-		{
-		case '\b':
-			result += "\\b";
-			break;
-		case '\t':
-			result += "\\t";
-			break;
-		case '\n':
-			result += "\\n";
-			break;
-		case '\f':
-			result += "\\f";
-			break;
-		case '\r':
-			result += "\\r";
-			break;
-		case '\"':
-			result += "\\\"";
-			break;
-		case '\\':
-			result += "\\\\";
-			break;
-		default:
-			if(static_cast<unsigned char>(c) < 0x20)
-			{
-				constexpr auto hexLookup = "0123456789ABCDEF";
-				result += "\\u00";
-				result += hexLookup[c >> 4];
-				result += hexLookup[c & 0xF];
-			}
-			else
-			{
-				result += c;
-			}
-		}
-	}
-
-	result += '\"';
-
+	appendStringLiteral(result, str);
 	return result;
 }
 
@@ -657,10 +714,14 @@ std::string fromStringLiteral(std::string_view str)
 	std::string result;
 	result.reserve(str.size());
 
+	// Copy the runs between escapes whole instead of a byte at a time.
+	std::size_t runStart = 0;
+
 	for(std::size_t i = 0; i < str.size(); ++i)
 	{
 		if(str[i] == '\\' && i != str.size() - 1)
 		{
+			result += str.substr(runStart, i - runStart);
 			++i;
 			switch(str[i])
 			{
@@ -723,12 +784,12 @@ std::string fromStringLiteral(std::string_view str)
 			default:
 				result += str[i];
 			}
-		}
-		else
-		{
-			result += str[i];
+
+			runStart = i + 1;
 		}
 	}
+
+	result += str.substr(runStart);
 
 	return result;
 }
