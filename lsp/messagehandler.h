@@ -110,13 +110,18 @@ private:
 
 	// General
 	Connection&                                      m_connection;
-	ThreadPool                                       m_threadPool;
-	// Incoming requests
-	StrMap<std::string, HandlerWrapper>              m_requestHandlersByMethod;
+	// Incoming requests. The wrapper is held by shared_ptr so a dispatch can
+	// take a reference out of the table and outlive a concurrent re-register.
+	using HandlerWrapperPtr = std::shared_ptr<const HandlerWrapper>;
+	StrMap<std::string, HandlerWrapperPtr>           m_requestHandlersByMethod;
 	std::mutex                                       m_requestHandlersMutex;
 	// Outgoing requests
 	std::mutex                                       m_pendingRequestsMutex;
 	std::unordered_map<MessageId, RequestResultPtr>  m_pendingRequests;
+	// DECLARED LAST, SO IT IS DESTROYED FIRST: ~ThreadPool joins the workers,
+	// and a task still writing a response reaches the maps above while they
+	// are all still alive.
+	ThreadPool                                       m_threadPool;
 
 	template<typename T>
 	static jsonrpc::Response createResponse(const MessageId& id, T&& result);

@@ -82,11 +82,20 @@ void MessageHandler::remove(std::string_view method)
 
 MessageHandler::OptionalResponse MessageHandler::processRequest(jsonrpc::Request&& request, bool allowAsync)
 {
-	std::unique_lock lock{m_requestHandlersMutex};
+	// The handler is taken out of the table under the lock and kept alive by the
+	// shared_ptr for the whole call: dispatching through the table's iterator
+	// after unlocking let add()/remove() destroy the callable mid-call.
+	HandlerWrapperPtr handler;
+	{
+		const auto lock = std::lock_guard(m_requestHandlersMutex);
+
+		if(const auto it = m_requestHandlersByMethod.find(request.method); it != m_requestHandlersByMethod.end())
+			handler = it->second;
+	}
+
 	OptionalResponse response;
 
-	if(const auto handlerIt = m_requestHandlersByMethod.find(request.method);
-	   handlerIt != m_requestHandlersByMethod.end() && handlerIt->second)
+	if(handler && *handler)
 	{
 		assert(!t_currentRequestId);
 		if(request.id.has_value())
@@ -101,10 +110,8 @@ MessageHandler::OptionalResponse MessageHandler::processRequest(jsonrpc::Request
 
 		try
 		{
-			lock.unlock();
-
 			// Call handler for the method type and return optional response
-			response = handlerIt->second(
+			response = (*handler)(
 				request.params.has_value() ? std::move(*request.params) : json::Null{},
 				allowAsync);
 		}
@@ -193,8 +200,10 @@ void MessageHandler::processResponse(jsonrpc::Response&& response)
 
 void MessageHandler::addHandler(std::string_view method, HandlerWrapper&& handlerFunc)
 {
-	std::lock_guard lock{m_requestHandlersMutex};
-	m_requestHandlersByMethod[std::string(method)] = std::move(handlerFunc);
+	auto handler = std::make_shared<const HandlerWrapper>(std::move(handlerFunc));
+
+	const auto lock = std::lock_guard(m_requestHandlersMutex);
+	m_requestHandlersByMethod[std::string(method)] = std::move(handler);
 }
 
 MessageHandler& MessageHandler::add(std::string_view method, GenericMessageCallback callback)
@@ -256,11 +265,17 @@ void MessageHandler::sendResponse(jsonrpc::Response&& response)
 
 MessageId MessageHandler::sendRequest(std::string_view method, RequestResultPtr result, std::optional<json::Value>&& params)
 {
-	std::lock_guard lock{m_pendingRequestsMutex};
 	const auto messageId = nextUniqueRequestId();
-	m_pendingRequests[messageId] = std::move(result);
-	auto request = jsonrpc::createRequest(messageId, method, std::move(params));
-	m_connection.writeMessage(std::move(request));
+
+	// The pending entry is in place before the request goes out, but the lock is
+	// not held across the write: a congested wire would otherwise stall every
+	// response the read thread is trying to deliver.
+	{
+		const auto lock = std::lock_guard(m_pendingRequestsMutex);
+		m_pendingRequests[messageId] = std::move(result);
+	}
+
+	m_connection.writeMessage(jsonrpc::createRequest(messageId, method, std::move(params)));
 	return messageId;
 }
 
