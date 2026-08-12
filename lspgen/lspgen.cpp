@@ -22,6 +22,7 @@ namespace strings{
 
 #define STRING(x) const std::string x{#x};
 STRING(both)
+STRING(clientCapability)
 STRING(clientToServer)
 STRING(documentation)
 STRING(element)
@@ -40,6 +41,7 @@ STRING(errorData)
 STRING(properties)
 STRING(registrationOptions)
 STRING(result)
+STRING(serverCapability)
 STRING(serverToClient)
 STRING(supportsCustomValues)
 STRING(type)
@@ -630,6 +632,17 @@ struct Message{
 	std::string partialResultTypeName;
 	std::string errorDataTypeName;
 	std::string registrationOptionsTypeName;
+	// The capability path that gates the message, when the meta model names one.
+	std::string clientCapability;
+	std::string serverCapability;
+
+	static std::string capabilityPath(const json::Object& json, const std::string& key)
+	{
+		if(!json.contains(key))
+			return {};
+
+		return json.get(key).string();
+	}
 
 	static std::string memberTypeName(const json::Object& json, const std::string& key)
 	{
@@ -663,6 +676,8 @@ struct Message{
 		partialResultTypeName = memberTypeName(json, strings::partialResult);
 		errorDataTypeName = memberTypeName(json, strings::errorData);
 		registrationOptionsTypeName = memberTypeName(json, strings::registrationOptions);
+		clientCapability = capabilityPath(json, strings::clientCapability);
+		serverCapability = capabilityPath(json, strings::serverCapability);
 	}
 };
 
@@ -1086,6 +1101,13 @@ private:
 		                               "\tstatic constexpr auto Method    = std::string_view(\"" + method + "\");\n"
 		                               "\tstatic constexpr auto Direction = MessageDirection::" + messageDirection + ";\n"
 		                               "\tstatic constexpr auto Type      = Message::" + (isNotification ? "Notification" : "Request") + ";\n";
+
+		// Emitted only when the meta model names one, like the type aliases below.
+		if(!message.clientCapability.empty())
+			m_messagesHeaderFileContent += "\tstatic constexpr auto ClientCapability = std::string_view(\"" + message.clientCapability + "\");\n";
+
+		if(!message.serverCapability.empty())
+			m_messagesHeaderFileContent += "\tstatic constexpr auto ServerCapability = std::string_view(\"" + message.serverCapability + "\");\n";
 
 		const bool hasRegistrationOptions = !message.registrationOptionsTypeName.empty();
 		const bool hasPartialResult = !message.partialResultTypeName.empty();
