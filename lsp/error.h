@@ -23,6 +23,7 @@ public:
 		InternalError        = -32603,
 		ServerNotInitialized = -32002,
 		UnknownErrorCode     = -32001,
+		PendingResponseRejected = -32097,
 		RequestFailed        = -32803,
 		ServerCancelled      = -32802,
 		ContentModified      = -32801,

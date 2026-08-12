@@ -40,6 +40,48 @@ MessageHandler::MessageHandler(Connection& connection, unsigned int maxResponseT
 {
 }
 
+// STOPPED BEFORE IT IS JOINED. The pool is the first member destroyed, and
+// joining a handler that is still working would wait for the whole of its work.
+// vsc-node drops its request tokens without stopping them because dispose()
+// joins nothing; this one joins, so it stops.
+MessageHandler::~MessageHandler()
+{
+	{
+		const auto lock = std::lock_guard(m_requestTokensMutex);
+
+		for(auto& [id, source] : m_requestTokens)
+			source.request_stop();
+	}
+
+	// The outgoing half of the same shutdown: nothing is going to answer these.
+	auto pending = std::unordered_map<MessageId, RequestResultPtr>();
+	{
+		const auto lock = std::lock_guard(m_pendingRequestsMutex);
+		pending.swap(m_pendingRequests);
+	}
+
+	for(auto& [id, result] : pending)
+	{
+		if(!result)
+			continue;
+
+		try
+		{
+			result->setError(ResponseError(MessageError::PendingResponseRejected,
+			                               "Pending response rejected since the message handler was destroyed"));
+		}
+		catch(...)
+		{
+			// A destructor may not propagate what a response callback throws.
+		}
+	}
+}
+
+void MessageHandler::waitUntilFinished()
+{
+	m_threadPool.waitUntilFinished();
+}
+
 void MessageHandler::processIncomingMessages()
 {
 	auto messageOrBatch = m_connection.readMessage();

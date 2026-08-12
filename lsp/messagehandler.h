@@ -27,9 +27,14 @@ using MessageId = jsonrpc::MessageId;
 class MessageHandler{
 public:
 	explicit MessageHandler(Connection& connection, unsigned int maxResponseThreads = std::thread::hardware_concurrency() / 2);
-	~MessageHandler() = default;
+	~MessageHandler();
 
 	void processIncomingMessages();
+
+	// Waits until every response still being computed has been written. The
+	// destructor stops what is in flight rather than waiting for it, so a
+	// consumer that wants a clean drain asks for one here first.
+	void waitUntilFinished();
 
 	struct GenericMessage{
 		using Params = json::Value;
