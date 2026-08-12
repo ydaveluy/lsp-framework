@@ -8,6 +8,7 @@
 #include <memory>
 #include <cassert>
 #include <functional>
+#include <stdexcept>
 #include <condition_variable>
 
 namespace lsp{
@@ -33,11 +34,13 @@ private:
 	struct TaskBase;
 	using TaskPtr = std::unique_ptr<TaskBase>;
 
-	bool                     m_waitForNewTasks = false;
-	unsigned int             m_maxThreads      = std::thread::hardware_concurrency();
+	bool                     m_stopping    = false;
+	unsigned int             m_maxThreads  = std::thread::hardware_concurrency();
+	std::size_t              m_idleThreads = 0; // Workers waiting for a task.
 	std::vector<std::thread> m_threads;
 	std::queue<TaskPtr>      m_taskQueue;
 	std::mutex               m_mutex;
+	std::mutex               m_shutdownMutex; // Serializes waitUntilFinished callers.
 	std::condition_variable  m_event;
 
 	void addTask(TaskPtr task);
@@ -46,6 +49,8 @@ private:
 	struct TaskBase{
 		virtual ~TaskBase() = default;
 		virtual void execute() = 0;
+		// Answers the future of a task the pool refused because it is stopping.
+		virtual void cancel() = 0;
 	};
 
 	template<typename F, typename ...Args>
@@ -83,6 +88,11 @@ private:
 					promise.set_exception(std::current_exception());
 				}
 			}, std::move(callbackArgs));
+		}
+
+		void cancel() override
+		{
+			promise.set_exception(std::make_exception_ptr(std::runtime_error("ThreadPool is shutting down")));
 		}
 	};
 
