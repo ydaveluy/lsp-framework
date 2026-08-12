@@ -32,6 +32,23 @@ jsonrpc::Response MessageHandler::createResponseFromAsyncResult(const MessageId&
 }
 
 /*
+ * invokeCallback
+ */
+
+template<typename F, typename... Args>
+decltype(auto) MessageHandler::invokeCallback(F& callback, const RequestContext& context, Args&&... args)
+{
+	if constexpr(std::invocable<F&, const MessageId&, Args..., std::stop_token>)
+		return callback(context.id, std::forward<Args>(args)..., context.token);
+	else if constexpr(std::invocable<F&, Args..., std::stop_token>)
+		return callback(std::forward<Args>(args)..., context.token);
+	else if constexpr(std::invocable<F&, const MessageId&, Args...>)
+		return callback(context.id, std::forward<Args>(args)...);
+	else
+		return callback(std::forward<Args>(args)...);
+}
+
+/*
  * add
  */
 
@@ -39,19 +56,18 @@ template<typename M, typename F>
 MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsRequestCallback<M, F>
 {
 	addHandler(M::Method,
-	[this, f = std::forward<F>(handlerFunc)](json::Value&& json, bool allowAsync) -> OptionalResponse
+	[this, f = std::forward<F>(handlerFunc)](const RequestContext& context, json::Value&& json, bool allowAsync) -> OptionalResponse
 	{
 		typename M::Params params;
 		fromJson(std::move(json), params);
-		const auto& id = currentRequestId();
 
 		if constexpr(IsCallbackResult<AsyncRequestResult<M>, typename M::Params, F>)
 		{
-			auto future = f(std::move(params));
+			auto future = invokeCallback(f, context, std::move(params));
 
 			if(allowAsync)
 			{
-				m_threadPool.addTask([this, id = id, future = std::move(future)]() mutable
+				m_threadPool.addTask([this, id = context.id, registration = context.registration, future = std::move(future)]() mutable
 				{
 					auto response = createResponseFromAsyncResult<M>(id, future);
 					sendResponse(std::move(response));
@@ -60,13 +76,13 @@ MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsRequestCallback<
 				return std::nullopt;
 			}
 
-			return createResponse(id, future.get());
+			return createResponse(context.id, future.get());
 		}
 		else
 		{
 			(void)this;
 			(void)allowAsync;
-			return createResponse(id, f(std::move(params)));
+			return createResponse(context.id, invokeCallback(f, context, std::move(params)));
 		}
 	});
 
@@ -77,17 +93,15 @@ template<typename M, typename F>
 MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsNoParamsRequestCallback<M, F>
 {
 	addHandler(M::Method,
-	[this, f = std::forward<F>(handlerFunc)](json::Value&&, bool allowAsync) -> OptionalResponse
+	[this, f = std::forward<F>(handlerFunc)](const RequestContext& context, json::Value&&, bool allowAsync) -> OptionalResponse
 	{
-		const auto& id = currentRequestId();
-
 		if constexpr(IsNoParamsCallbackResult<AsyncRequestResult<M>, F>)
 		{
-			auto future = f();
+			auto future = invokeCallback(f, context);
 
 			if(allowAsync)
 			{
-				m_threadPool.addTask([this, id = id, result = std::move(future)]() mutable
+				m_threadPool.addTask([this, id = context.id, registration = context.registration, result = std::move(future)]() mutable
 				{
 					auto response = createResponseFromAsyncResult<M>(id, result);
 					sendResponse(std::move(response));
@@ -96,13 +110,13 @@ MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsNoParamsRequestC
 				return std::nullopt;
 			}
 
-			return createResponse(id, future.get());
+			return createResponse(context.id, future.get());
 		}
 		else
 		{
 			(void)this;
 			(void)allowAsync;
-			return createResponse(id, f());
+			return createResponse(context.id, invokeCallback(f, context));
 		}
 	});
 
@@ -113,14 +127,14 @@ template<typename M, typename F>
 MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsNotificationCallback<M, F>
 {
 	addHandler(M::Method,
-	[this, f = std::forward<F>(handlerFunc)](json::Value&& json, bool allowAsync) -> OptionalResponse
+	[this, f = std::forward<F>(handlerFunc)](const RequestContext& context, json::Value&& json, bool allowAsync) -> OptionalResponse
 	{
 		typename M::Params params;
 		fromJson(std::move(json), params);
 
 		if constexpr(IsCallbackResult<AsyncNotificationResult, typename M::Params, F>)
 		{
-			auto future = f(std::move(params));
+			auto future = invokeCallback(f, context, std::move(params));
 
 			if(allowAsync)
 			{
@@ -138,7 +152,7 @@ MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsNotificationCall
 		{
 			(void)this;
 			(void)allowAsync;
-			f(std::move(params));
+			invokeCallback(f, context, std::move(params));
 		}
 
 		return std::nullopt;
@@ -151,11 +165,11 @@ template<typename M, typename F>
 MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsNoParamsNotificationCallback<M, F>
 {
 	addHandler(M::Method,
-	[this, f = std::forward<F>(handlerFunc)](json::Value&&, bool allowAsync) -> OptionalResponse
+	[this, f = std::forward<F>(handlerFunc)](const RequestContext& context, json::Value&&, bool allowAsync) -> OptionalResponse
 	{
 		if constexpr(IsNoParamsCallbackResult<AsyncNotificationResult, F>)
 		{
-			auto future = f();
+			auto future = invokeCallback(f, context);
 
 			if(allowAsync)
 			{
@@ -173,7 +187,7 @@ MessageHandler& MessageHandler::add(F&& handlerFunc) requires IsNoParamsNotifica
 		{
 			(void)this;
 			(void)allowAsync;
-			f();
+			invokeCallback(f, context);
 		}
 
 		return std::nullopt;

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <concepts>
+#include <stop_token>
 #include <lsp/error.h>
+#include <lsp/jsonrpc/jsonrpc.h>
 #include <lsp/messagebase.h>
 #include <lsp/requestresult.h>
 
@@ -11,12 +13,26 @@ namespace lsp{
  * Concepts to verify the type of callback
  */
 
+// A callback may take the id of the request it serves as its first parameter
+// and that request's cancellation token as its last. Neither is ambient state
+// to be asked for: both have to reach the callback for them to survive being
+// captured and handed to another thread.
+
+template<typename T, typename F, typename... P>
+concept IsCallbackResultOf =
+	(std::invocable<F, P...> && std::same_as<std::invoke_result_t<F, P...>, T>) ||
+	(std::invocable<F, const jsonrpc::MessageId&, P...> &&
+	 std::same_as<std::invoke_result_t<F, const jsonrpc::MessageId&, P...>, T>) ||
+	(std::invocable<F, P..., std::stop_token> &&
+	 std::same_as<std::invoke_result_t<F, P..., std::stop_token>, T>) ||
+	(std::invocable<F, const jsonrpc::MessageId&, P..., std::stop_token> &&
+	 std::same_as<std::invoke_result_t<F, const jsonrpc::MessageId&, P..., std::stop_token>, T>);
 
 template<typename T, typename F>
-concept IsNoParamsCallbackResult = std::invocable<F> && std::same_as<std::invoke_result_t<F>, T>;
+concept IsNoParamsCallbackResult = IsCallbackResultOf<T, F>;
 
 template<typename T, typename P, typename F>
-concept IsCallbackResult = std::invocable<F, P> && std::same_as<std::invoke_result_t<F, P>, T>;
+concept IsCallbackResult = IsCallbackResultOf<T, F, P>;
 
 template<typename M, typename F>
 concept IsRequestCallbackResult = IsCallbackResult<typename M::Result, typename M::Params, F> ||

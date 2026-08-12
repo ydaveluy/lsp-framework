@@ -223,6 +223,15 @@ if(LSP_BUILD_TESTS)
 	endif()
 
 	add_test(NAME RoundTrip COMMAND LspRoundTripTest)
+
+	add_executable(LspCancellationTest ${LSP_DIR}/tests/cancellation.cpp)
+	target_link_libraries(LspCancellationTest lsp)
+
+	if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+		target_compile_options(LspCancellationTest PRIVATE -UNDEBUG)
+	endif()
+
+	add_test(NAME Cancellation COMMAND LspCancellationTest)
 endif()
 
 if(LSP_BUILD_EXAMPLES)

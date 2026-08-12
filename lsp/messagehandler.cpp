@@ -4,12 +4,32 @@
 namespace lsp{
 namespace{
 
-thread_local const MessageId* t_currentRequestId = nullptr;
+constexpr std::string_view CancelRequestMethod{"$/cancelRequest"};
 
 json::Integer nextUniqueRequestId()
 {
 	static std::atomic<json::Integer> s_uniqueRequestId = 0;
 	return ++s_uniqueRequestId;
+}
+
+// The request a $/cancelRequest names, when it names one the protocol allows.
+std::optional<MessageId> cancelledRequestId(const std::optional<json::Value>& params)
+{
+	if(!params.has_value() || !params->isObject())
+		return std::nullopt;
+
+	const auto* const id = params->object().find("id");
+
+	if(!id)
+		return std::nullopt;
+
+	if(id->isInteger())
+		return MessageId(id->integer());
+
+	if(id->isString())
+		return MessageId(id->string());
+
+	return std::nullopt;
 }
 
 }
@@ -63,15 +83,6 @@ void MessageHandler::processIncomingMessages()
 	}
 }
 
-const MessageId& MessageHandler::currentRequestId()
-{
-	assert(t_currentRequestId);
-	if(!t_currentRequestId)
-		throw std::logic_error("MessageHandler::currentRequestId called outside of a request context");
-
-	return *t_currentRequestId;
-}
-
 void MessageHandler::remove(std::string_view method)
 {
 	std::lock_guard lock{m_requestHandlersMutex};
@@ -80,8 +91,55 @@ void MessageHandler::remove(std::string_view method)
 		m_requestHandlersByMethod.erase(it);
 }
 
+// Stops a running request, or remembers the id of one no pump has dispatched
+// yet. Only the dispatcher sees a message before the handler table does, which
+// is why the cancellation registry belongs here and not in the consumer.
+bool MessageHandler::cancelRequest(const std::optional<json::Value>& params)
+{
+	const auto id = cancelledRequestId(params);
+
+	if(!id.has_value())
+		return false;
+
+	const auto lock = std::lock_guard(m_requestTokensMutex);
+
+	if(const auto it = m_requestTokens.find(*id); it != m_requestTokens.end())
+	{
+		it->second.request_stop();
+		return true;
+	}
+
+	m_cancelledBeforeDispatch.insert(*id);
+	return false;
+}
+
+MessageHandler::RequestRegistrationPtr MessageHandler::registerRequestToken(const MessageId& id, std::stop_source& source)
+{
+	{
+		const auto lock = std::lock_guard(m_requestTokensMutex);
+
+		if(m_cancelledBeforeDispatch.erase(id) != 0)
+			source.request_stop();
+
+		m_requestTokens.insert_or_assign(id, source);
+	}
+
+	return std::make_shared<const RequestRegistration>(*this, id);
+}
+
+void MessageHandler::eraseRequestToken(const MessageId& id)
+{
+	const auto lock = std::lock_guard(m_requestTokensMutex);
+	m_requestTokens.erase(id);
+}
+
 MessageHandler::OptionalResponse MessageHandler::processRequest(jsonrpc::Request&& request, bool allowAsync)
 {
+	// $/cancelRequest is answered here, before the handler table is consulted:
+	// a request that is already running is stopped and the notification ends.
+	if(request.method == CancelRequestMethod && cancelRequest(request.params))
+		return std::nullopt;
+
 	// The handler is taken out of the table under the lock and kept alive by the
 	// shared_ptr for the whole call: dispatching through the table's iterator
 	// after unlocking let add()/remove() destroy the callable mid-call.
@@ -97,21 +155,25 @@ MessageHandler::OptionalResponse MessageHandler::processRequest(jsonrpc::Request
 
 	if(handler && *handler)
 	{
-		assert(!t_currentRequestId);
-		if(request.id.has_value())
-		{
-			t_currentRequestId = &request.id.value();
-		}
-		else
-		{
-			static const MessageId NullMessageId = json::Null();
-			t_currentRequestId = &NullMessageId;
-		}
+		// A notification is a request whose id is null, and the handler is told
+		// which one it serves rather than having to ask the current thread.
+		// The token is registered here, on the read thread, so a cancel that
+		// arrives while the handler works finds it.
+		static const MessageId NullMessageId = json::Null();
+		const MessageId&       id            = request.id.has_value() ? *request.id : NullMessageId;
+
+		auto       source  = std::stop_source();
+		const auto context = RequestContext{
+			.id           = id,
+			.token        = source.get_token(),
+			.registration = request.isNotification() ? RequestRegistrationPtr() : registerRequestToken(id, source)
+		};
 
 		try
 		{
 			// Call handler for the method type and return optional response
 			response = (*handler)(
+				context,
 				request.params.has_value() ? std::move(*request.params) : json::Null{},
 				allowAsync);
 		}
@@ -139,13 +201,6 @@ MessageHandler::OptionalResponse MessageHandler::processRequest(jsonrpc::Request
 					*request.id, MessageError::InternalError, e.what());
 			}
 		}
-		catch(...)
-		{
-			t_currentRequestId = nullptr;
-			throw;
-		}
-
-		t_currentRequestId = nullptr;
 	}
 	else
 	{
@@ -173,29 +228,16 @@ void MessageHandler::processResponse(jsonrpc::Response&& response)
 	if(!result) // If there's no result it means a response was received without a request which makes no sense but just ignore it...
 		return;
 
-	try
+	if(response.result.has_value())
 	{
-		assert(!t_currentRequestId);
-		t_currentRequestId = &response.id;
-
-		if(response.result.has_value())
-		{
-			result->setValueFromJson(std::move(*response.result));
-		}
-		else // Error response received.
-		{
-			assert(response.error.has_value());
-			auto& error = *response.error;
-			result->setError(ResponseError(error.code, std::move(error.message), std::move(error.data)));
-		}
+		result->setValueFromJson(std::move(*response.result));
 	}
-	catch(...)
+	else // Error response received.
 	{
-		t_currentRequestId = nullptr;
-		throw;
+		assert(response.error.has_value());
+		auto& error = *response.error;
+		result->setError(ResponseError(error.code, std::move(error.message), std::move(error.data)));
 	}
-
-	t_currentRequestId = nullptr;
 }
 
 void MessageHandler::addHandler(std::string_view method, HandlerWrapper&& handlerFunc)
@@ -209,13 +251,13 @@ void MessageHandler::addHandler(std::string_view method, HandlerWrapper&& handle
 MessageHandler& MessageHandler::add(std::string_view method, GenericMessageCallback callback)
 {
 	addHandler(method,
-		[f = std::move(callback)](json::Value&& params, bool) -> OptionalResponse
+		[f = std::move(callback)](const RequestContext& context, json::Value&& params, bool) -> OptionalResponse
 		{
-			const auto isNotification = std::holds_alternative<std::nullptr_t>(currentRequestId());
-			auto result = f(std::move(params));
+			const auto isNotification = std::holds_alternative<json::Null>(context.id);
+			auto result = f(context.id, std::move(params), context.token);
 
 			if(!isNotification)
-				return jsonrpc::createResponse(currentRequestId(), std::move(result));
+				return jsonrpc::createResponse(context.id, std::move(result));
 
 			return std::nullopt;
 		}
@@ -227,15 +269,16 @@ MessageHandler& MessageHandler::add(std::string_view method, GenericMessageCallb
 MessageHandler& MessageHandler::add(std::string_view method, GenericAsyncMessageCallback callback)
 {
 	addHandler(method,
-		[this, f = std::move(callback)](json::Value&& params, bool allowAsync) -> OptionalResponse
+		[this, f = std::move(callback)](const RequestContext& context, json::Value&& params, bool allowAsync) -> OptionalResponse
 		{
-			const auto isNotification = std::holds_alternative<std::nullptr_t>(currentRequestId());
-			auto future = f(std::move(params));
+			const auto isNotification = std::holds_alternative<json::Null>(context.id);
+			auto future = f(context.id, std::move(params), context.token);
 
 			if(allowAsync)
 			{
 				m_threadPool.addTask(
-					[this, future = std::move(future), isNotification = isNotification, requestId = currentRequestId()]() mutable
+					[this, future = std::move(future), isNotification = isNotification,
+					 requestId = context.id, registration = context.registration]() mutable
 					{
 						auto response = createResponseFromAsyncResult<GenericMessage>(requestId, future);
 
@@ -249,7 +292,7 @@ MessageHandler& MessageHandler::add(std::string_view method, GenericAsyncMessage
 			auto result = future.get();
 
 			if(!isNotification)
-				return jsonrpc::createResponse(currentRequestId(), std::move(result));
+				return jsonrpc::createResponse(context.id, std::move(result));
 
 			return std::nullopt;
 		}

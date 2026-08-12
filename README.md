@@ -95,11 +95,28 @@ The template parameter is the type of the message the callback is for and determ
 
 The callback returns the result of the request (`MessageType::Result`) if it has one.
 
-The id of the current request can be obtained using `lsp::MessageHandler::currentRequestId`. However, this function can only be called from inside of a request callback. Otherwise a `std::logic_error` is thrown.
+A callback that needs the id of the request it is serving declares it as an additional first parameter of type `const lsp::MessageId&`, and one that wants to know whether the request has been cancelled declares a `std::stop_token` as its last. Either may be omitted; both may be taken:
+
+```cpp
+messageHandler.add<lsp::requests::TextDocument_Hover>(
+    [](const lsp::MessageId& id,
+       lsp::requests::TextDocument_Hover::Params&& params,
+       std::stop_token token){ ... });
+```
+
+Both are passed rather than looked up so that they survive being captured and handed to another thread, which is exactly what an async callback does.
+
+### Cancellation
+
+`$/cancelRequest` is handled by the framework, before the handler table is consulted — it is the only place that sees a message early enough to cancel a request no pump has dispatched yet. A cancel that names a running request stops its token; one that arrives before the request does is remembered, and the request then starts on a token that is already stopped.
+
+The request is dispatched either way: **the framework never drops a cancelled request, skips its handler, or answers in its place.** Only the handler knows whether a partial result is still worth sending, so it decides — by returning a result, or by throwing `lsp::RequestError(lsp::MessageError::RequestCancelled, ...)`, which the existing error path carries to the wire.
+
+Notifications have neither an id nor a registered token, so they are never cancellable.
 
 It is also possible to send messages that do not have a generated c++ type. This option is not type-safe but allows for sending custom notifications and requests that are not part of the specification or are not yet contained in the meta model used for generating the code.
 
-In order to send these types of generic messages you need to call the non-template overload of `MessageHandler::add` which takes the message method string and a callback function that is invoked with the request payload and returns the response. Both are of type `lsp::json::Any`. There is an async overload as well that expects the result of the callback to be `std::future<lsp::json::Any>`.
+In order to send these types of generic messages you need to call the non-template overload of `MessageHandler::add` which takes the message method string and a callback function that is invoked with the request id, the request payload and the cancellation token, and returns the response. The payload and the response are of type `lsp::json::Any`. There is an async overload as well that expects the result of the callback to be `std::future<lsp::json::Any>`. Unlike the typed callbacks, a generic one takes all three: it has no declaration to infer anything from.
 
 `MessageHandler::add` returns a reference to the handler itself in order to easily chain multiple callback registrations without repeating the handler instance over and over:
 
@@ -174,7 +191,7 @@ auto messageId = messageHandler.sendRequest<lsp::requests::TextDocument_Diagnost
     });
 ```
 
-`lsp::MessageHandler::currentRequestId` can be called from inside such a callback to obtain the id of the request.
+`sendRequest` returns the id of the request it sent, so a response callback that needs it captures it from there.
 
 Just like with handling requests it is also possible to send generic json messages using the non-template overloads of `MessageHandler::sendRequest`.
 

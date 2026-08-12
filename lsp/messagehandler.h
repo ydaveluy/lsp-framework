@@ -2,7 +2,10 @@
 
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
+#include <stop_token>
+#include <unordered_set>
 #include <utility>
 #include <lsp/concepts.h>
 #include <lsp/connection.h>
@@ -27,17 +30,19 @@ public:
 	~MessageHandler() = default;
 
 	void processIncomingMessages();
-	// Only valid when called from within a request or response callback.
-	// Throws std::logic_error if not called in that context.
-	[[nodiscard]] static const MessageId& currentRequestId();
 
 	struct GenericMessage{
 		using Params = json::Value;
 		using Result = json::Value;
 	};
 
-	using GenericMessageCallback       = std::function<json::Value(json::Value&&)>;
-	using GenericAsyncMessageCallback  = std::function<AsyncRequestResult<GenericMessage>(json::Value&&)>;
+	// A generic callback is handed everything the dispatcher knows about the
+	// request: which one it is and whether it has been cancelled. There is no
+	// shorter form, because a shorter form could only get them from ambient
+	// state. Typed callbacks may drop either parameter -- see concepts.h --
+	// since the wrapper keeps both regardless of what the callback asked for.
+	using GenericMessageCallback       = std::function<json::Value(const MessageId&, json::Value&&, std::stop_token)>;
+	using GenericAsyncMessageCallback  = std::function<AsyncRequestResult<GenericMessage>(const MessageId&, json::Value&&, std::stop_token)>;
 	using GenericResponseCallback      = std::function<void(json::Value&&)>;
 	using GenericErrorResponseCallback = std::function<void(const ResponseError&)>;
 
@@ -106,7 +111,20 @@ private:
 	using RequestResultPtr  = std::unique_ptr<RequestResultBase>;
 	using ResponseResultPtr = std::unique_ptr<ResponseResultBase>;
 	using OptionalResponse  = std::optional<jsonrpc::Response>;
-	using HandlerWrapper    = std::function<OptionalResponse(json::Value&&, bool)>;
+
+	class RequestRegistration;
+	using RequestRegistrationPtr = std::shared_ptr<const RequestRegistration>;
+
+	// What the dispatcher tells a handler wrapper about the request it serves.
+	// The registration is what keeps the cancellation token in the table: the
+	// async path copies it into the pool task, which outlives processRequest.
+	struct RequestContext{
+		const MessageId&       id;
+		std::stop_token        token;
+		RequestRegistrationPtr registration;
+	};
+
+	using HandlerWrapper = std::function<OptionalResponse(const RequestContext&, json::Value&&, bool)>;
 
 	// General
 	Connection&                                      m_connection;
@@ -115,6 +133,11 @@ private:
 	using HandlerWrapperPtr = std::shared_ptr<const HandlerWrapper>;
 	StrMap<std::string, HandlerWrapperPtr>           m_requestHandlersByMethod;
 	std::mutex                                       m_requestHandlersMutex;
+	// Incoming request cancellation. A cancel that arrives before the request
+	// it names is remembered, so the handler can start on a stopped token.
+	std::mutex                                       m_requestTokensMutex;
+	std::unordered_map<MessageId, std::stop_source>  m_requestTokens;
+	std::unordered_set<MessageId>                    m_cancelledBeforeDispatch;
 	// Outgoing requests
 	std::mutex                                       m_pendingRequestsMutex;
 	std::unordered_map<MessageId, RequestResultPtr>  m_pendingRequests;
@@ -129,11 +152,41 @@ private:
 	template<typename M>
 	static jsonrpc::Response createResponseFromAsyncResult(const MessageId& id, AsyncRequestResult<M>& result);
 
+	// Prepends the request id and appends its cancellation token, each when the
+	// callback declared a parameter for it.
+	template<typename F, typename... Args>
+	static decltype(auto) invokeCallback(F& callback, const RequestContext& context, Args&&... args);
+
+	// Handles $/cancelRequest. Returns true when the request was already
+	// running, which is when the notification stops here.
+	bool cancelRequest(const std::optional<json::Value>& params);
+	[[nodiscard]] RequestRegistrationPtr registerRequestToken(const MessageId& id, std::stop_source& source);
+	void eraseRequestToken(const MessageId& id);
+
 	OptionalResponse processRequest(jsonrpc::Request&& request, bool allowAsync);
 	void processResponse(jsonrpc::Response&& response);
 	void addHandler(std::string_view method, HandlerWrapper&& handlerFunc);
 	void sendResponse(jsonrpc::Response&& response);
 	MessageId sendRequest(std::string_view method, RequestResultPtr result, std::optional<json::Value>&& params = std::nullopt);
+
+	// Holds a request's entry in m_requestTokens for as long as anyone can still
+	// answer that request.
+	class RequestRegistration{
+	public:
+		RequestRegistration(MessageHandler& handler, MessageId id)
+			: m_handler{handler}
+			, m_id{std::move(id)}
+		{
+		}
+
+		RequestRegistration(const RequestRegistration&) = delete;
+		RequestRegistration& operator=(const RequestRegistration&) = delete;
+		~RequestRegistration(){ m_handler.eraseRequestToken(m_id); }
+
+	private:
+		MessageHandler& m_handler;
+		MessageId       m_id;
+	};
 
 	/*
 	 * Request result wrapper
