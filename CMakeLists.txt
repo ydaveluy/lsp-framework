@@ -72,7 +72,10 @@ endif()
 
 # lspgen
 
-add_executable(lspgen lspgen/lspgen.cpp lsp/json/json.cpp)
+# EXCLUDE_FROM_ALL: the generator is out of the build path, which is what lets a
+# cross build work -- a wasm32 `lspgen` is a file the host cannot run. Only
+# `regenerate` builds it, and only a meta-model bump asks for that.
+add_executable(lspgen EXCLUDE_FROM_ALL lspgen/lspgen.cpp lsp/json/json.cpp)
 target_include_directories(lspgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # liblsp
@@ -124,8 +127,16 @@ set(LSP_SOURCES
 )
 list(TRANSFORM LSP_SOURCES PREPEND ${LSP_SRC_DIR}/)
 
-set(LSP_GENERATED_FILES_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
-file(MAKE_DIRECTORY ${LSP_GENERATED_FILES_DIR}/lsp)
+# THE GENERATED TYPES ARE CHECKED IN, and the meta model is why: it is the LSP
+# specification's own file, which moves a few times a year. Regenerating it on
+# every build paid a compile and a run of `lspgen` for an answer that had not
+# changed -- and made CROSS BUILDS impossible, since a generator built for the
+# target is a program the host cannot run.
+#
+# `make regenerate` is what a meta-model bump runs. CI runs it too and requires
+# the diff to be EMPTY: that check is the whole reason committing generated
+# files is safe, and without it they would silently drift from their source.
+set(LSP_GENERATED_FILES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/generated)
 
 set(LSP_GENERATED_HEADERS
 	${LSP_GENERATED_FILES_DIR}/lsp/types.h
@@ -136,13 +147,12 @@ set(LSP_GENERATED_SOURCES
 	${LSP_GENERATED_FILES_DIR}/lsp/types.cpp
 )
 
-add_custom_command(
+add_custom_target(regenerate
 	COMMAND lspgen ${LSP_METAMODEL_JSON}
 	WORKING_DIRECTORY ${LSP_GENERATED_FILES_DIR}/lsp
-	OUTPUT ${LSP_GENERATED_HEADERS} ${LSP_GENERATED_SOURCES}
-	DEPENDS lspgen ${LSP_METAMODEL_JSON}
-	COMMENT "Generating lsp types from meta model..."
+	COMMENT "Regenerating lsp types from the meta model (commit the result)..."
 )
+add_dependencies(regenerate lspgen)
 
 add_library(lsp
 	${LSP_HEADERS}
