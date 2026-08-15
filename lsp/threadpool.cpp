@@ -2,8 +2,12 @@
 
 namespace lsp{
 
+// ZERO MEANS INLINE, and it is the only answer on a platform that has no
+// threads at all: WASI's `pthread_create` is a stub, so a floor of one worker
+// made every request fail with "thread constructor failed: Not supported". A
+// caller that says zero gets its task run where it submitted it.
 ThreadPool::ThreadPool(unsigned int initialThreads, unsigned int maxThreads)
-	: m_maxThreads{std::max(maxThreads, 1u)}
+	: m_maxThreads{maxThreads}
 {
 	const auto lock = std::lock_guard(m_mutex);
 	m_threads.reserve(initialThreads);
@@ -49,6 +53,15 @@ void ThreadPool::addTask(TaskPtr task)
 	{
 		lock.unlock();
 		task->cancel();
+		return;
+	}
+
+	// No pool at all: run it here, outside the lock, so a task submitting a
+	// follow-up is not deadlocked by the mutex it is already under.
+	if(m_maxThreads == 0)
+	{
+		lock.unlock();
+		task->execute();
 		return;
 	}
 
