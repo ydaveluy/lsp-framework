@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstring>
 #include <future>
 #include <optional>
 #include <stdexcept>
@@ -231,6 +232,50 @@ int main(int argc, char** argv)
 
 		test::check(called, "called");
 		test::compare(received, std::unordered_map<std::string, int>{{"x", 1}});
+		test::check(thenResult.has_value(), "hasResult");
+		test::compare(*thenResult, 42);
+	});
+
+	app.addTest("Request/ResponseBeforeSendReturns", [](){
+		// A peer that answers each request before the write that sent it returns:
+		// the response must still find its pending request.
+		struct EagerPeerStream : io::Stream{
+			MessageHandler* handler = nullptr;
+			std::string     input;
+
+			void read(char* buffer, std::size_t size) override
+			{
+				if(input.size() < size)
+					throw io::Error("EagerPeerStream: no data available");
+
+				std::memcpy(buffer, input.data(), size);
+				input.erase(0, size);
+			}
+
+			void write(const char* buffer, std::size_t size) override
+			{
+				const auto text = std::string_view(buffer, size);
+
+				if(text.starts_with("Content-Length"))
+					return;
+
+				const auto request = json::parse(text);
+				input += makeMessage(R"({"jsonrpc":"2.0","id":)" +
+				                     json::stringify(request.object().get("id")) +
+				                     R"(,"result":42})");
+				handler->processNextMessage();
+			}
+		};
+
+		auto stream     = EagerPeerStream();
+		auto handler    = MessageHandler(Connection(stream));
+		auto thenResult = std::optional<int>();
+		stream.handler  = &handler;
+
+		handler.sendRequest<TestRequest>({{"x", 1}},
+			[&](int result){ thenResult = result; },
+			[](const ResponseError&){ test::fail("Expected no error"); });
+
 		test::check(thenResult.has_value(), "hasResult");
 		test::compare(*thenResult, 42);
 	});

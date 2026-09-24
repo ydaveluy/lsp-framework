@@ -237,8 +237,8 @@ auto MessageHandler::sendCustomRequest(std::string_view method, const typename M
 	auto requestSender = m_connection.request(method, requestId);
 
 	requestSender.writeParams(params);
-	requestSender.submit();
 	addPendingRequest(std::move(result));
+	requestSender.submit();
 
 	return requestId;
 }
@@ -276,8 +276,8 @@ auto MessageHandler::sendCustomRequest(std::string_view method, F&& then, E&& er
 		std::forward<E>(error));
 	auto requestSender = m_connection.request(method, requestId);
 
-	requestSender.submit();
 	addPendingRequest(std::move(result));
+	requestSender.submit();
 
 	return requestId;
 }
@@ -312,8 +312,8 @@ auto MessageHandler::sendCustomRequest(std::string_view method, const typename M
 	auto       requestSender = m_connection.request(method, requestId);
 
 	requestSender.writeParams(params);
-	requestSender.submit();
 	addPendingRequest(std::move(result));
+	requestSender.submit();
 
 	return RequestResult(std::move(future), requestId);
 }
@@ -347,8 +347,8 @@ auto MessageHandler::sendCustomRequest(std::string_view method) -> RequestResult
 	auto       future        = result->future();
 	auto       requestSender = m_connection.request(method, requestId);
 
-	requestSender.submit();
 	addPendingRequest(std::move(result));
+	requestSender.submit();
 
 	return RequestResult(std::move(future), requestId);
 }
