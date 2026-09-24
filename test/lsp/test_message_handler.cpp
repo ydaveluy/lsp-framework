@@ -528,6 +528,40 @@ int main(int argc, char** argv)
 		test::check(response.object().contains("result"), "hasResult");
 	});
 
+	app.addTest("Async/ResponseToClosedConnection", [](){
+		// The peer is gone when the response is written: the request is not
+		// answered a second time and the response thread survives.
+		struct ClosingStream : LoopbackStream{
+			bool closed = false;
+
+			void write(const char* buffer, std::size_t size) override
+			{
+				if(closed)
+					throw io::Error("ClosingStream: closed");
+
+				LoopbackStream::write(buffer, size);
+			}
+		};
+
+		auto stream = ClosingStream();
+
+		{
+			auto handler = MessageHandler(Connection(stream));
+
+			handler.on<TestNoParamsRequest>([]() -> TaskFunction<TestNoParamsRequest::Result>
+			{
+				return TaskFunction<TestNoParamsRequest::Result>([]{ return std::vector<int>{7}; });
+			});
+
+			const auto request = makeMessage(R"({"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"})");
+			stream.write(request.data(), request.size());
+			stream.closed = true;
+			handler.processNextMessage();
+		}
+
+		test::check(stream.empty(), "nothingWritten");
+	});
+
 	app.addTest("Async/DynamicResult", [](bool async, int expected){
 		auto stream  = LoopbackStream();
 		auto handler = MessageHandler(Connection(stream));

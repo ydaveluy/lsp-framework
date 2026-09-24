@@ -208,6 +208,11 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 					batchSender);
 			}
 		}
+		catch(const ConnectionError&)
+		{
+			// Not the request's failure: answering it would write to the same dead connection
+			throw;
+		}
 		catch(const RequestError& e)
 		{
 			if(!request.isNotification())

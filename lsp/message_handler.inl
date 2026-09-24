@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <concepts>
+#include <optional>
 #include <utility>
 #include "message_handler.h"
 
@@ -27,51 +28,56 @@ void MessageHandler::dispatchMessageLog(MessageLog& msgLog, const T& payload)
 template<typename M>
 void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Connection::BatchSender* batchSender)
 {
-	const auto ctx = RequestContext::get();
+	const auto ctx         = RequestContext::get();
+	auto       resultValue = std::optional<typename M::Result>();
 
-	// Result.get() can throw if the result invokes a callback or calls std::future::get
+	// Result.get() can throw if the result invokes a callback or calls std::future::get.
+	// Only that is answered with an error: a failure to write the answer is not the request's.
 	try
 	{
-		const auto resultValue = result.get();
-		removeActive(ctx.id());
-
-		if(shouldLog())
-		{
-			auto msgLog = MessageLog{
-				.incoming        = false,
-				.method          = ctx.method(),
-				.requestDuration = std::chrono::steady_clock::now() - ctx.timestamp(),
-				.id              = ctx.id(),
-			};
-
-			dispatchMessageLog(msgLog, resultValue);
-		}
-
-		if(batchSender)
-		{
-			auto responseWriter = batchSender->writeResponse(ctx.id());
-			responseWriter.writeData(
-				[](std::string_view key, const typename M::Result& value, json::ObjectWriter& objectWriter)
-				{
-					writeJson(key, value, objectWriter);
-				}, resultValue);
-		}
-		else
-		{
-			auto responseSender = m_connection.response(result.requestId());
-			responseSender.writeData(resultValue);
-			responseSender.submit();
-		}
+		resultValue.emplace(result.get());
 	}
 	catch(const RequestError& e)
 	{
 		removeActive(ctx.id());
 		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), e.code(), e.what(), e.data(), batchSender);
+		return;
 	}
 	catch(std::exception& e)
 	{
 		removeActive(ctx.id());
 		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {}, batchSender);
+		return;
+	}
+
+	removeActive(ctx.id());
+
+	if(shouldLog())
+	{
+		auto msgLog = MessageLog{
+			.incoming        = false,
+			.method          = ctx.method(),
+			.requestDuration = std::chrono::steady_clock::now() - ctx.timestamp(),
+			.id              = ctx.id(),
+		};
+
+		dispatchMessageLog(msgLog, *resultValue);
+	}
+
+	if(batchSender)
+	{
+		auto responseWriter = batchSender->writeResponse(ctx.id());
+		responseWriter.writeData(
+			[](std::string_view key, const typename M::Result& value, json::ObjectWriter& objectWriter)
+			{
+				writeJson(key, value, objectWriter);
+			}, *resultValue);
+	}
+	else
+	{
+		auto responseSender = m_connection.response(result.requestId());
+		responseSender.writeData(*resultValue);
+		responseSender.submit();
 	}
 }
 
@@ -140,7 +146,15 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 					[this, method = method, timestamp = context.timestamp(), requestId = context.id(), result = std::move(result)]() mutable
 					{
 						auto context = RequestContext(*this, method, requestId, timestamp);
-						sendResponse<M>(result, nullptr);
+
+						try
+						{
+							sendResponse<M>(result, nullptr);
+						}
+						catch(const ConnectionError&)
+						{
+							// The connection is gone and the message loop will see it: there is nobody to answer
+						}
 					});
 			}
 		});
