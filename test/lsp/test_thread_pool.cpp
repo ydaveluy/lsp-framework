@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <thread>
 #include <test/test.h>
@@ -10,6 +11,24 @@ using namespace lsp;
 int main(int argc, char** argv)
 {
 	auto app = test::TestApp();
+
+	app.addTest("ThreadPool/GrowsWhenEveryWorkerIsBusy", [](){
+		auto pool      = ThreadPool(0, 2);
+		auto started   = std::promise<void>();
+		auto secondRan = std::promise<void>();
+		auto sawSecond = std::atomic<bool>(false);
+
+		pool.addTask([&, second = secondRan.get_future()]() mutable
+		{
+			started.set_value();
+			sawSecond = second.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+		});
+		started.get_future().wait();
+		pool.addTask([&]{ secondRan.set_value(); });
+		pool.waitUntilFinished();
+
+		test::check(sawSecond.load(), "secondRanWhileFirstWaited");
+	});
 
 	app.addTest("ThreadPool/RunsSubmittedTask", [](){
 		auto pool = ThreadPool();

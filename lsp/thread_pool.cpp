@@ -49,7 +49,9 @@ void ThreadPool::addTask(Task task)
 
 	m_taskQueue.emplace(std::move(task));
 
-	if((m_taskQueue.size() > 1 && m_threads.size() < m_maxThreads) || m_threads.empty())
+	// Only an idle worker would pick the task up now: without one it would wait
+	// behind a running task, so grow instead.
+	if(m_taskQueue.size() > m_idleThreads && m_threads.size() < m_maxThreads)
 		addThread();
 
 	lock.unlock();
@@ -68,7 +70,11 @@ void ThreadPool::addThread()
 				auto lock = std::unique_lock(m_mutex);
 
 				if(m_waitForNewTasks && m_taskQueue.empty())
+				{
+					++m_idleThreads;
 					m_event.wait(lock, [this](){ return !m_waitForNewTasks || !m_taskQueue.empty(); });
+					--m_idleThreads;
+				}
 
 				if(!m_taskQueue.empty())
 				{

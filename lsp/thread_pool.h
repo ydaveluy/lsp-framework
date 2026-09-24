@@ -22,6 +22,7 @@ public:
 private:
 	bool                     m_waitForNewTasks = false;
 	unsigned int             m_maxThreads      = std::thread::hardware_concurrency();
+	std::size_t              m_idleThreads     = 0; // Workers waiting for a task
 	std::vector<std::thread> m_threads;
 	std::queue<Task>         m_taskQueue;
 	std::mutex               m_mutex;
