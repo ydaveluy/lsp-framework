@@ -116,8 +116,8 @@ protected:
 
 private:
 	std::atomic<State> m_state = State::Inactive;
+	LogHook            m_logHook; // Outlives the message handler whose responses log through it
 	MessageHandler     m_messageHandler;
-	LogHook            m_logHook;
 };
 
 /*

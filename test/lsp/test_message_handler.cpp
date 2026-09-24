@@ -488,6 +488,42 @@ int main(int argc, char** argv)
 		test::check(taskThreadFuture.get() != mainThread, "ranOnWorkerThread");
 	});
 
+	app.addTest("Async/InFlightAtDestruction", [](){
+		// The handler is destroyed while a response is still being computed: the
+		// response finishes and is written, using the handler's own members.
+		auto stream   = LoopbackStream();
+		auto release  = std::promise<void>();
+		auto released = release.get_future().share();
+
+		{
+			auto handler = MessageHandler(Connection(stream));
+
+			handler.on<TestNoParamsRequest>([released]() -> TaskFunction<TestNoParamsRequest::Result>
+			{
+				return TaskFunction<TestNoParamsRequest::Result>([released]() -> std::vector<int>
+				{
+					released.wait();
+					return std::vector<int>{7};
+				});
+			});
+
+			const auto request = makeMessage(R"({"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"})");
+			stream.write(request.data(), request.size());
+			handler.processNextMessage();
+
+			auto releaser = std::thread([&release]
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				release.set_value();
+			});
+			releaser.detach();
+		}
+
+		const auto response = parseMessageBody(stream.takeAll());
+		test::compare(response.object().get("id").integer(), 1);
+		test::check(response.object().contains("result"), "hasResult");
+	});
+
 	app.addTest("Async/DynamicResult", [](bool async, int expected){
 		auto stream  = LoopbackStream();
 		auto handler = MessageHandler(Connection(stream));

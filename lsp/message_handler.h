@@ -191,7 +191,6 @@ private:
 
 	// General
 	Connection                                      m_connection;
-	ThreadPool                                      m_threadPool;
 	std::atomic<MessageLogLevel>                    m_msgLogLevel = MessageHandler::MessageLogLevel::Off;
 	std::vector<MessageLogCallback>                 m_msgLogCallbacks;
 	// Incoming requests
@@ -202,6 +201,9 @@ private:
 	// Outgoing requests
 	std::mutex                                      m_pendingRequestsMutex;
 	std::vector<PendingRequestPtr>                  m_pendingRequests;
+	// Declared last so it is destroyed first: joining it lets queued and running
+	// responses finish while the members they use are still alive.
+	ThreadPool                                      m_threadPool;
 
 	void addActive(const RequestId& id);
 	void removeActive(const RequestId& id);
