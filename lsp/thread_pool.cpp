@@ -40,6 +40,12 @@ void ThreadPool::waitUntilFinished()
 	m_event.notify_all();
 }
 
+void ThreadPool::setMaxThreads(unsigned int maxThreads)
+{
+	const auto lock = std::lock_guard(m_mutex);
+	m_maxThreads = std::max(maxThreads, 1u);
+}
+
 void ThreadPool::addTask(Task task)
 {
 	auto lock = std::unique_lock(m_mutex);

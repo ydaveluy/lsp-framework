@@ -28,6 +28,7 @@ public:
 
 	void processNextMessage();
 	void setConnection(Connection connection);
+	void setMaxResponseThreads(unsigned int maxResponseThreads);
 
 	/*
 	 * Callback registration

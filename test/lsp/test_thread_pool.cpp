@@ -30,6 +30,25 @@ int main(int argc, char** argv)
 		test::check(sawSecond.load(), "secondRanWhileFirstWaited");
 	});
 
+	app.addTest("ThreadPool/SetMaxThreadsAllowsGrowth", [](){
+		auto pool      = ThreadPool(0, 1);
+		auto started   = std::promise<void>();
+		auto secondRan = std::promise<void>();
+		auto sawSecond = std::atomic<bool>(false);
+
+		pool.setMaxThreads(2);
+		pool.addTask([&, second = secondRan.get_future()]() mutable
+		{
+			started.set_value();
+			sawSecond = second.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+		});
+		started.get_future().wait();
+		pool.addTask([&]{ secondRan.set_value(); });
+		pool.waitUntilFinished();
+
+		test::check(sawSecond.load(), "secondRanWhileFirstWaited");
+	});
+
 	app.addTest("ThreadPool/RunsSubmittedTask", [](){
 		auto pool = ThreadPool();
 		auto ran  = std::atomic<bool>(false);

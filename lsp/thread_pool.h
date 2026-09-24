@@ -18,6 +18,7 @@ public:
 
 	void addTask(Task task);
 	void waitUntilFinished();
+	void setMaxThreads(unsigned int maxThreads);
 
 private:
 	bool                     m_waitForNewTasks = false;

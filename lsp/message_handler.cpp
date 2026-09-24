@@ -98,6 +98,11 @@ void MessageHandler::setConnection(Connection connection)
 	m_connection = std::move(connection);
 }
 
+void MessageHandler::setMaxResponseThreads(unsigned int maxResponseThreads)
+{
+	m_threadPool.setMaxThreads(maxResponseThreads);
+}
+
 void MessageHandler::remove(const std::string& method)
 {
 	const auto lock = std::lock_guard(m_requestHandlersMutex);
