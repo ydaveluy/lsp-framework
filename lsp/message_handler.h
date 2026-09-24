@@ -3,6 +3,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <stop_token>
 #include <unordered_map>
 #include <lsp/connection.h>
 #include <lsp/error.h>
@@ -24,7 +25,7 @@ using RequestDuration  = std::chrono::steady_clock::duration;
 class MessageHandler{
 public:
 	explicit MessageHandler(Connection connection, unsigned int maxResponseThreads = std::thread::hardware_concurrency() / 2);
-	~MessageHandler() = default;
+	~MessageHandler();
 
 	void processNextMessage();
 	void setConnection(Connection connection);
@@ -112,6 +113,7 @@ public:
 
 	void cancel(const RequestId& id);
 	[[nodiscard]] auto isCanceled(const RequestId& id) -> bool;
+	[[nodiscard]] auto stopToken(const RequestId& id) -> std::stop_token;
 
 	/*
 	 * RequestContext
@@ -131,6 +133,7 @@ public:
 		[[nodiscard]] auto id() const -> const RequestId&{ return m_requestId; }
 		[[nodiscard]] auto timestamp() const -> RequestTimestamp{ return m_requestTimestamp; }
 		[[nodiscard]] auto isCanceled() const -> bool{ return m_messageHandler->isCanceled(id()); }
+		[[nodiscard]] auto stopToken() const -> std::stop_token{ return m_messageHandler->stopToken(id()); }
 
 		void throwIfCanceled() const;
 
@@ -186,8 +189,8 @@ private:
 	using HandlerWrapper    = std::function<void(json::Value&&, Connection::BatchSender*)>;
 
 	struct ActiveRequest{
-		RequestId id;
-		bool      canceled = false;
+		RequestId        id;
+		std::stop_source source;
 	};
 
 	// General

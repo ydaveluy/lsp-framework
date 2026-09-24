@@ -62,6 +62,16 @@ MessageHandler::MessageHandler(Connection connection, unsigned int maxResponseTh
 {
 }
 
+MessageHandler::~MessageHandler()
+{
+	// Joining the response threads waits for every request still computing:
+	// stopping them first lets a request that observes its token end early.
+	const auto lock = std::lock_guard(m_activeRequestMutex);
+
+	for(auto& request : m_activeRequests)
+		request.source.request_stop();
+}
+
 void MessageHandler::processNextMessage()
 {
 	auto messageOrBatch = m_connection.readMessage();
@@ -117,14 +127,21 @@ void MessageHandler::cancel(const RequestId& id)
 	const auto it   = std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; });
 
 	if(it != m_activeRequests.end())
-		it->canceled = true;
+		it->source.request_stop();
 }
 
 auto MessageHandler::isCanceled(const RequestId& id) -> bool
 {
 	const auto lock = std::lock_guard(m_activeRequestMutex);
 	const auto it   = std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; });
-	return it != m_activeRequests.end() && it->canceled;
+	return it != m_activeRequests.end() && it->source.stop_requested();
+}
+
+auto MessageHandler::stopToken(const RequestId& id) -> std::stop_token
+{
+	const auto lock = std::lock_guard(m_activeRequestMutex);
+	const auto it   = std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; });
+	return it != m_activeRequests.end() ? it->source.get_token() : std::stop_token();
 }
 
 void MessageHandler::setMessageLogLevel(MessageLogLevel msgLogLevel)
@@ -314,7 +331,7 @@ void MessageHandler::addActive(const RequestId& id)
 {
 	const auto lock = std::lock_guard(m_activeRequestMutex);
 	assert(std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; }) == m_activeRequests.end());
-	m_activeRequests.push_back({id});
+	m_activeRequests.push_back({id, std::stop_source()});
 }
 
 void MessageHandler::removeActive(const RequestId& id)

@@ -1,8 +1,12 @@
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <future>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -872,6 +876,70 @@ int main(int argc, char** argv)
 
 		test::check(!canceledBefore, "notCanceledBeforeCancelCall");
 		test::check(canceledAfter, "canceledAfterCancelCall");
+	});
+
+	app.addTest("Cancelation/StopTokenWakesAWaitingRequest", [](){
+		auto stream  = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto started = std::promise<void>();
+		auto woken   = false;
+
+		handler.on<TestNoParamsRequest>([&]() -> TaskFunction<TestNoParamsRequest::Result>
+		{
+			return TaskFunction<TestNoParamsRequest::Result>([&]() -> std::vector<int>
+			{
+				auto token = MessageHandler::RequestContext::get().stopToken();
+				auto mutex = std::mutex();
+				auto event = std::condition_variable_any();
+				auto lock  = std::unique_lock(mutex);
+				started.set_value();
+				woken = event.wait_for(lock, token, std::chrono::seconds(2), []{ return false; }) || token.stop_requested();
+				MessageHandler::RequestContext::get().throwIfCanceled();
+				return std::vector<int>{};
+			});
+		});
+
+		auto response = handler.sendRequest<TestNoParamsRequest>();
+		handler.processNextMessage();
+		test::check(started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready, "started");
+
+		handler.cancel(response.requestId());
+		handler.processNextMessage();
+
+		test::check(woken, "wokenByCancel");
+		expectResponseError(response, MessageError::RequestCancelled, "Canceled");
+	});
+
+	app.addTest("Cancelation/DestructionStopsRequestsInFlight", [](){
+		auto stream  = LoopbackStream();
+		auto started = std::promise<void>();
+		auto stopped = std::atomic<bool>(false);
+
+		{
+			auto handler = MessageHandler(Connection(stream));
+
+			handler.on<TestNoParamsRequest>([&]() -> TaskFunction<TestNoParamsRequest::Result>
+			{
+				return TaskFunction<TestNoParamsRequest::Result>([&]() -> std::vector<int>
+				{
+					auto token = MessageHandler::RequestContext::get().stopToken();
+					auto mutex = std::mutex();
+					auto event = std::condition_variable_any();
+					auto lock  = std::unique_lock(mutex);
+					started.set_value();
+					event.wait_for(lock, token, std::chrono::seconds(5), []{ return false; });
+					stopped = token.stop_requested();
+					return std::vector<int>{};
+				});
+			});
+
+			const auto request = makeMessage(R"({"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"})");
+			stream.write(request.data(), request.size());
+			handler.processNextMessage();
+			test::check(started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready, "started");
+		}
+
+		test::check(stopped.load(), "stoppedByDestruction");
 	});
 
 	app.addTest("Cancelation/ThrowIfCanceledIsNoOpWhenNotCanceled", [](){
