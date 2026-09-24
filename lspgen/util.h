@@ -139,7 +139,7 @@ inline auto readFileContent(const std::string& fileName, bool mayFail = false) -
 
 	std::string text;
 	text.resize(static_cast<std::string::size_type>(fileSize));
-	file.read(&text[0], fileSize);
+	file.read(&text[0], static_cast<std::streamsize>(fileSize));
 
 	return text;
 }
