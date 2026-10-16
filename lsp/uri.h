@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -48,18 +49,18 @@ public:
 
 	[[nodiscard]] auto operator==(const Uri& other) const -> bool;
 	[[nodiscard]] auto operator!=(const Uri& other) const -> bool{ return !(*this == other); }
-	[[nodiscard]] auto operator<(const Uri& other) const -> bool{ return m_data < other.m_data; }
+	[[nodiscard]] auto operator<(const Uri& other) const -> bool;
 
 private:
-	std::string   m_data;
-	std::uint16_t m_schemeLen        = 0;
-	std::uint16_t m_authorityLen     = 0;
-	std::uint16_t m_pathLen          = 0;
-	std::uint16_t m_queryLen         = 0;
-	std::uint16_t m_fragmentLen      = 0;
-	std::uint8_t  m_hasAuthority : 1 = 0;
-	std::uint8_t  m_hasQuery     : 1 = 0;
-	std::uint8_t  m_hasFragment  : 1 = 0;
+	std::string  m_data;
+	std::size_t  m_schemeLen        = 0;
+	std::size_t  m_authorityLen     = 0;
+	std::size_t  m_pathLen          = 0;
+	std::size_t  m_queryLen         = 0;
+	std::size_t  m_fragmentLen      = 0;
+	std::uint8_t m_hasAuthority : 1 = 0;
+	std::uint8_t m_hasQuery     : 1 = 0;
+	std::uint8_t m_hasFragment  : 1 = 0;
 
 	void insertScheme(std::string_view scheme);
 	void insertAuthority(std::string_view authority);

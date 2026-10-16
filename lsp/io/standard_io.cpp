@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <lsp/io/stream.h>
+#include <lsp/io/sigpipe_guard.h>
 #include <lsp/io/standard_io.h>
 
 namespace lsp::io{
@@ -23,16 +24,39 @@ public:
 
 	void read(char* buffer, std::size_t size) override
 	{
-		if(std::fread(buffer, size, 1, stdin) < 1 && std::ferror(stdin) != 0)
-			throw Error(std::strerror(errno));
+		if(std::fread(buffer, 1, size, stdin) != size)
+		{
+			if(std::ferror(stdin) != 0)
+				throw Error(std::strerror(errno));
+			throw Error("Reached EOF");
+		}
 	}
 
 	void write(const char* buffer, std::size_t size) override
 	{
-		if(std::fwrite(buffer, size, 1, stdout) < 1)
-			throw Error(std::strerror(errno));
+		if(size == 0)
+			return;
 
-		std::fflush(stdout);
+#if defined(__APPLE__) || defined(__linux__) || defined(__HAIKU__)
+		auto signalGuard = detail::SigpipeGuard();
+		if(signalGuard.error() != 0)
+			throw Error(std::strerror(signalGuard.error()));
+#endif
+		if(std::fwrite(buffer, 1, size, stdout) != size)
+		{
+#if defined(__APPLE__) || defined(__linux__) || defined(__HAIKU__)
+			signalGuard.failedWith(errno);
+#endif
+			throw Error(std::strerror(errno));
+		}
+
+		if(std::fflush(stdout) != 0)
+		{
+#if defined(__APPLE__) || defined(__linux__) || defined(__HAIKU__)
+			signalGuard.failedWith(errno);
+#endif
+			throw Error(std::strerror(errno));
+		}
 	}
 };
 

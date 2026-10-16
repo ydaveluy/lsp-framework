@@ -1,6 +1,7 @@
 #include <test/test.h>
 #include <lsp/uri.h>
 #include <filesystem>
+#include <set>
 
 using namespace lsp;
 
@@ -35,6 +36,8 @@ int main(int argc, char** argv)
 		{"AuthorityPath",             {"file://server/share/file.txt",           "server",                     true}},
 		{"AuthorityUserInfoPort",     {"http://user:pass@example.com:8080",      "user:pass@example.com:8080", true}},
 		{"AuthorityUserInfoPortPath", {"http://user:pass@example.com:8080/path", "user:pass@example.com:8080", true}},
+		{"AuthorityBeforeQuery",      {"http://example.com?query",              "example.com",               true}},
+		{"AuthorityBeforeFragment",   {"http://example.com#frag",               "example.com",               true}},
 	});
 
 	app.addTest("Path", [](std::string_view input, std::string_view expectedPath)
@@ -51,7 +54,7 @@ int main(int argc, char** argv)
 		{"OpaquePath",               {"urn:isbn:0451450523", "isbn:0451450523"}},
 		{"PercentDecoded",           {"file:///a%20b",       "/a b"           }},
 		{"PercentDecodedUnicode",    {"file:///%E4%B8%AD",   "/中"            }},
-		{"MalformedPercentEncoding", {"file:///%zz",         {}               }},
+		{"MalformedPercentEncoding", {"file:///%zz",         "/%zz"          }},
 		{"QueryTerminatesPath",      {"file:///path?query",  "/path"          }},
 		{"FragmentTerminatesPath",   {"file:///path#frag",   "/path"          }},
 	});
@@ -71,6 +74,7 @@ int main(int argc, char** argv)
 		{"NotPercentDecoded",         {"file:///path?a%20b",         "a%20b",     true }},
 		{"PercentEncodingUppercased", {"file:///path?a%2fb",         "a%2Fb",     true }},
 		{"EmbeddedQuestionMark",      {"file:///path?a=1?b=2",       "a=1?b=2",   true }},
+		{"AuthorityWithoutPath",      {"http://example.com?query",  "query",     true }},
 	});
 
 	app.addTest("Fragment", [](std::string_view input, std::string_view expectedFragment, bool expectedHasFragment)
@@ -89,6 +93,7 @@ int main(int argc, char** argv)
 		{"PercentEncodingUppercased", {"file:///path#a%2fb",             "a%2Fb",   true }},
 		{"EmbeddedHash",              {"file:///path#a#b",               "a#b",     true }},
 		{"EmbeddedQuestionMark",      {"file:///path#a?b",               "a?b",     true }},
+		{"AuthorityWithoutPath",      {"http://example.com#frag",        "frag",    true }},
 	});
 
 	app.addTest("Invalid", [](std::string_view input)
@@ -101,8 +106,6 @@ int main(int argc, char** argv)
 		{"EmptyScheme",                        {"://path"}},
 		{"InvalidSchemeChar",                  {"ht!tp:path"}},
 		{"NoSchemeAuthorityLike",              {"//host/path"}},
-		{"AuthorityWithoutPathBeforeQuery",    {"http://example.com?query"}},
-		{"AuthorityWithoutPathBeforeFragment", {"http://example.com#frag"}},
 	});
 
 	app.addTest("Set/Remove", [](){
@@ -195,6 +198,22 @@ int main(int argc, char** argv)
 		test::compare(uri.toString(), "file:///C%3A/some/file?key=value#section");
 	});
 
+	app.addTest("EmptyPathAfterAuthorityRoundTrips", [](std::string_view input)
+	{
+		const auto uri = Uri::parse(input);
+		test::check(uri.isValid());
+		test::compare(uri.toString(), input);
+		test::check(Uri::parse(uri.toString()) == uri);
+	})({
+		{"AuthorityOnly", {"x://host"}},
+		{"BeforeQuery", {"x://host?query"}},
+		{"BeforeFragment", {"x://host#frag"}},
+		{"BeforeQueryAndFragment", {"x://host?query#frag"}},
+		{"EmptyAuthority", {"x://"}},
+		{"EmptyAuthorityQuery", {"x://?query"}},
+		{"EmptyAuthorityFragment", {"x://#frag"}},
+	});
+
 	app.addTest("IsFileUri", [](std::string_view input, bool expected)
 	{
 		const auto uri = Uri::parse(input);
@@ -203,6 +222,24 @@ int main(int argc, char** argv)
 	})({
 		{"FileScheme",    {"file:///path",       true }},
 		{"NonFileScheme", {"http://example.com", false}},
+	});
+
+	app.addTest("MalformedEscapesPreservePath", [](std::string_view input, std::string_view expectedPath, std::string_view expectedText)
+	{
+		const auto uri = Uri::parse(input);
+		test::check(uri.isValid());
+		test::compare(uri.path(), expectedPath);
+		test::compare(uri.toString(), expectedText);
+		test::check(Uri::parse(uri.toString()) == uri);
+	})({
+		{"InvalidHex", {"file:///%zz", "/%zz", "file:///%25zz"}},
+		{"LonePercent", {"file:///%", "/%", "file:///%25"}},
+		{"TruncatedEscape", {"file:///%2", "/%2", "file:///%252"}},
+		{"MalformedThenValid", {"file:///%zz%20", "/%zz ", "file:///%25zz%20"}},
+		{"ValidThenMalformed", {"file:///%20%zz", "/%20%zz", "file:///%2520%25zz"}},
+		{"SeparatedEscapes", {"file:///a%20b/%zz/c%2Fd", "/a b/%zz/c/d", "file:///a%20b/%25zz/c/d"}},
+		{"UnicodeAfterMalformed", {"file:///%zz%E4%B8%AD", "/%zz中", "file:///%25zz%E4%B8%AD"}},
+		{"MalformedUtf8", {"file:///%ff%20", "/%ff ", "file:///%25ff%20"}},
 	});
 
 	app.addTest("FileUriFromPath/FsPath", [](){
@@ -234,6 +271,60 @@ int main(int argc, char** argv)
 			const auto uri = Uri::fileUriFromPath("relative/path");
 			test::compare(Uri::parse(uri.toString()).fsPath(), uri.fsPath());
 		}
+	});
+
+	app.addTest("UncFilePath", [](){
+		const auto uri = Uri::parse("file://server/share/a%20b");
+		const auto fromSlashes = Uri::fileUriFromPath("//server/share/a b");
+		test::compare(fromSlashes.authority(), "server");
+		test::compare(fromSlashes.path(), "/share/a b");
+		test::compare(fromSlashes.toString(), "file://server/share/a%20b");
+#ifdef _WIN32
+		test::compare(uri.fsPath(), "\\\\server\\share\\a b");
+		const auto fromPath = Uri::fileUriFromPath("\\\\server\\share\\a b");
+		test::compare(fromPath.authority(), "server");
+		test::compare(fromPath.path(), "/share/a b");
+		test::compare(fromPath.toString(), "file://server/share/a%20b");
+#else
+		test::compare(uri.fsPath(), "//server/share/a b");
+#endif
+	});
+
+	app.addTest("EscapedUncAuthorityRoundTrips", [](std::string_view input, std::string_view expectedText)
+	{
+		const auto uri = Uri::fileUriFromPath(input);
+		auto expectedPath = std::string(input);
+#ifdef _WIN32
+		for(auto& c : expectedPath)
+			if(c == '/')
+				c = '\\';
+#endif
+		test::compare(uri.toString(), expectedText);
+		test::compare(uri.fsPath(), expectedPath);
+		test::compare(Uri::parse(uri.toString()).fsPath(), expectedPath);
+	})({
+		{"LiteralPercent", {"//ser%ver/share/a", "file://ser%25ver/share/a"}},
+		{"EscapeLikePercent", {"//ser%20ver/share/a", "file://ser%2520ver/share/a"}},
+		{"Space", {"//ser ver/share/a", "file://ser%20ver/share/a"}},
+		{"Unicode", {"//sérver/share/a", "file://s%C3%A9rver/share/a"}},
+#ifndef _WIN32
+		{"QuestionMark", {"//ser?ver/share/a", "file://ser%3Fver/share/a"}},
+		{"Hash", {"//ser#ver/share/a", "file://ser%23ver/share/a"}},
+#endif
+	});
+
+	app.addTest("DoubleSlashPathRequiresAuthority", [](){
+		auto uri = Uri::parse("x:/p");
+		test::check(!uri.setPath("//a"));
+		test::compare(uri.path(), "/p");
+		test::check(uri.setAuthority("host"));
+		test::check(uri.setPath("//a"));
+		test::compare(uri.toString(), "x://host//a");
+		uri.removeAuthority();
+		test::compare(uri.toString(), "x:%2F/a");
+		test::check(Uri::parse(uri.toString()) == uri);
+		test::check(uri.setAuthority("other"));
+		test::compare(uri.toString(), "x://other//a");
 	});
 
 	app.addTest("Equality", [](std::string_view lhsInput, std::string_view rhsInput, bool expectedEqual)
@@ -312,7 +403,63 @@ int main(int argc, char** argv)
 		test::compare(splitA.toString(), "http://example.com/x");
 		test::compare(splitB.toString(), "http://example.co/m/x");
 		test::check(splitA != splitB, "differentSplitNotEqual");
-		test::check(!(splitA < splitB) && !(splitB < splitA), "differentSplitNeitherLessThan");
+		test::check((splitA < splitB) != (splitB < splitA), "differentSplitOrdered");
+		test::compare(std::set<Uri>{splitA, splitB}.size(), std::size_t(2));
+	});
+
+	app.addTest("OrderingDistinguishesEmptyComponents", [](){
+		const auto plain = Uri::parse("x:/p");
+		const auto authority = Uri::parse("x:///p");
+		const auto query = Uri::parse("x:/p?");
+		const auto fragment = Uri::parse("x:/p#");
+		test::compare(std::set<Uri>{plain, authority, query, fragment}.size(), std::size_t(4));
+	});
+
+	app.addTest("LongComponentsSurviveParsing", [](){
+		const auto component = std::string(65536, 'a');
+		const auto checkRoundTrip = [](const std::string& input)
+		{
+			const auto uri = Uri::parse(input);
+			test::check(uri.isValid());
+			test::compare(uri.toString(), input);
+			test::check(Uri::parse(uri.toString()) == uri);
+		};
+		checkRoundTrip("x:/" + component);
+		checkRoundTrip(component + ":/p");
+		checkRoundTrip("x://" + component + "/p");
+		checkRoundTrip("x:/p?" + component);
+		checkRoundTrip("x:/p#" + component);
+		const auto input = component + "://" + component + "/" + component + "?" + component + "#" + component;
+		const auto uri = Uri::parse(input);
+		test::compare(uri.scheme(), component);
+		test::compare(uri.authority(), component);
+		test::compare(uri.path(), "/" + component);
+		test::compare(uri.query(), component);
+		test::compare(uri.fragment(), component);
+		checkRoundTrip(input);
+	});
+
+	app.addTest("LongComponentsSurviveSetters", [](){
+		const auto component = std::string(65536, 'a');
+		auto uri = Uri::parse("x:/p");
+		test::check(uri.setScheme(component));
+		test::check(uri.setAuthority(component));
+		test::check(uri.setPath("/" + component));
+		test::check(uri.setQuery(component));
+		test::check(uri.setFragment(component));
+		const auto expected = component + "://" + component + "/" + component + "?" + component + "#" + component;
+		test::compare(uri.toString(), expected);
+		test::check(Uri::parse(expected) == uri);
+		test::check(uri.setScheme("x"));
+		test::check(uri.setAuthority("host"));
+		test::check(uri.setPath("/p"));
+		test::check(uri.setQuery("q"));
+		test::check(uri.setFragment("f"));
+		test::compare(uri.toString(), "x://host/p?q#f");
+		uri.removeAuthority();
+		uri.removeQuery();
+		uri.removeFragment();
+		test::compare(uri.toString(), "x:/p");
 	});
 
 	app.addTest("Encode", [](std::string_view decoded, std::string_view exclude, std::string_view expectedEncoded)
@@ -338,7 +485,13 @@ int main(int argc, char** argv)
 		{"SpaceEscape",             {"a%20b", "a b"}},
 		{"TruncatedTrailingEscape", {"a%2",   "a%2"}},
 		{"LoneTrailingPercent",     {"a%",    "a%" }},
-		{"InvalidHexDigits",        {"a%zzb", ""   }},
+		{"InvalidHexDigits",        {"a%zzb", "a%zzb"}},
+		{"InvalidThenValid",        {"%zz%20", "%zz "}},
+		{"ValidThenInvalid",        {"%20%zz", "%20%zz"}},
+		{"Unicode",                 {"%F0%9F%92%A9", "💩"}},
+		{"InvalidUtf8",             {"%ff", "%ff"}},
+		{"SurrogateUtf8",           {"%ED%A0%80", "%ED%A0%80"}},
+		{"OverlongUtf8",            {"%C0%AF", "%C0%AF"}},
 	});
 
 	return app.main(argc, argv);

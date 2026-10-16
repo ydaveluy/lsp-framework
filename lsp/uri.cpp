@@ -1,6 +1,7 @@
 #include <cassert>
 #include <charconv>
 #include <filesystem>
+#include <tuple>
 #include <lsp/uri.h>
 
 namespace lsp{
@@ -21,12 +22,12 @@ auto isAlphanumeric(char c) -> bool
 	return isAlpha(c) || isDigit(c);
 }
 
-auto parseUriScheme(std::string_view uriSchemeStr) -> std::uint16_t
+auto parseUriScheme(std::string_view uriSchemeStr) -> std::size_t
 {
 	if(uriSchemeStr.empty() || !isAlpha(uriSchemeStr[0]))
 		return 0;
 
-	std::uint16_t len = 0;
+	std::size_t len = 0;
 
 	for(const char c : uriSchemeStr)
 	{
@@ -39,9 +40,9 @@ auto parseUriScheme(std::string_view uriSchemeStr) -> std::uint16_t
 	return len;
 }
 
-auto parseUriAuthority(std::string_view uriAuthorityStr) -> std::uint16_t
+auto parseUriAuthority(std::string_view uriAuthorityStr) -> std::size_t
 {
-	std::uint16_t len = 0;
+	std::size_t len = 0;
 
 	for(const char c : uriAuthorityStr)
 	{
@@ -54,9 +55,9 @@ auto parseUriAuthority(std::string_view uriAuthorityStr) -> std::uint16_t
 	return len;
 }
 
-auto parseUriPath(std::string_view uriPathStr) -> std::uint16_t
+auto parseUriPath(std::string_view uriPathStr) -> std::size_t
 {
-	std::uint16_t len = 0;
+	std::size_t len = 0;
 
 	for(const char c : uriPathStr)
 	{
@@ -69,9 +70,9 @@ auto parseUriPath(std::string_view uriPathStr) -> std::uint16_t
 	return len;
 }
 
-auto parseUriQuery(std::string_view uriQueryStr) -> std::uint16_t
+auto parseUriQuery(std::string_view uriQueryStr) -> std::size_t
 {
-	std::uint16_t len = 0;
+	std::size_t len = 0;
 
 	for(const char c : uriQueryStr)
 	{
@@ -87,6 +88,26 @@ auto parseUriQuery(std::string_view uriQueryStr) -> std::uint16_t
 auto hasCharAt(std::string_view str, std::size_t idx, char c) -> bool
 {
 	return str.size() > idx && str[idx] == c;
+}
+
+auto utf8SequenceLength(std::string_view bytes, std::size_t offset) -> std::size_t
+{
+	const auto first = static_cast<unsigned char>(bytes[offset]);
+	const auto length = first < 0x80 ? 1u : first >= 0xC2 && first <= 0xDF ? 2u :
+	                    first >= 0xE0 && first <= 0xEF ? 3u : first >= 0xF0 && first <= 0xF4 ? 4u : 0u;
+	if(length == 0 || length > bytes.size() - offset)
+		return 0;
+	for(std::size_t i = 1; i < length; ++i)
+		if((static_cast<unsigned char>(bytes[offset + i]) & 0xC0) != 0x80)
+			return 0;
+	if(length > 2)
+	{
+		const auto second = static_cast<unsigned char>(bytes[offset + 1]);
+		if((first == 0xE0 && second < 0xA0) || (first == 0xED && second >= 0xA0) ||
+		   (first == 0xF0 && second < 0x90) || (first == 0xF4 && second >= 0x90))
+			return 0;
+	}
+	return length;
 }
 
 void normalizeEncodedCase(std::string& str, std::size_t first, std::size_t count)
@@ -115,7 +136,7 @@ auto Uri::parse(std::string_view uriStr) -> Uri
 {
 	auto uri = Uri();
 
-	const auto schemeLen = static_cast<std::size_t>(parseUriScheme(uriStr));
+	const auto schemeLen = parseUriScheme(uriStr);
 
 	if(schemeLen == 0 || !hasCharAt(uriStr, schemeLen, ':'))
 		return {};
@@ -141,7 +162,7 @@ auto Uri::parse(std::string_view uriStr) -> Uri
 
 	if(!pathIsEmpty)
 	{
-		if(hasAuthority && uriStr[idx] != '/')
+		if(hasAuthority && uriStr[idx] != '/' && uriStr[idx] != '?' && uriStr[idx] != '#')
 			return {};
 
 		const auto pathLen     = parseUriPath(uriStr.substr(idx));
@@ -181,16 +202,36 @@ auto Uri::fileUriFromPath(std::string_view path) -> Uri
 {
 	const auto absPath = std::filesystem::absolute(
 		std::u8string_view(reinterpret_cast<const char8_t*>(path.data()), path.size()));
-	auto u8Path = absPath.u8string();
+	auto u8Path = absPath.generic_u8string();
+	auto uriPath = std::string_view(reinterpret_cast<const char*>(u8Path.data()), u8Path.size());
+	auto authority = std::string_view();
 
 #ifdef _WIN32
-	u8Path.insert(0, 1, '/');
+	if(uriPath.starts_with("//"))
+#else
+	if(path.starts_with("//"))
+#endif
+	{
+#ifndef _WIN32
+		uriPath = path;
+#endif
+		uriPath.remove_prefix(2);
+		const auto separator = uriPath.find('/');
+		authority = uriPath.substr(0, separator);
+		uriPath = separator == std::string_view::npos ? std::string_view("/") : uriPath.substr(separator);
+	}
+#ifdef _WIN32
+	else if(!uriPath.starts_with('/'))
+	{
+		u8Path.insert(0, 1, '/');
+		uriPath = std::string_view(reinterpret_cast<const char*>(u8Path.data()), u8Path.size());
+	}
 #endif
 
 	auto uri = Uri();
 	uri.setScheme(FileScheme);
-	uri.setAuthority({});
-	uri.setPath(std::string_view(reinterpret_cast<const char*>(u8Path.data()), u8Path.size()));
+	uri.setAuthority(encode(authority, ":@[]"));
+	uri.setPath(uriPath);
 
 	return uri;
 }
@@ -199,13 +240,31 @@ auto Uri::fsPath() const -> std::string
 {
 	assert(isFileUri());
 	auto p = path();
+	auto result = std::string();
+	if(!authority().empty())
+	{
+		const auto host = decode(authority());
+		result.reserve(2 + host.size() + p.size());
+		result = "//";
+		result += host;
+		result += p;
+	}
+	else
+	{
 
 #ifdef _WIN32
-	if(p.starts_with('/'))
-		p.remove_prefix(1);
+		if(p.size() >= 3 && p[0] == '/' && isAlpha(p[1]) && p[2] == ':')
+			p.remove_prefix(1);
 #endif
+		result = std::string(p);
+	}
 
-	return std::string(p);
+#ifdef _WIN32
+	for(auto& c : result)
+		if(c == '/')
+			c = '\\';
+#endif
+	return result;
 }
 
 auto Uri::isValid() const -> bool
@@ -249,7 +308,7 @@ auto Uri::authority() const -> std::string_view
 
 auto Uri::path() const -> std::string_view
 {
-	const auto pathIdx = std::size_t(m_schemeLen + m_authorityLen);
+	const auto pathIdx = m_schemeLen + m_authorityLen;
 	return std::string_view(m_data).substr(pathIdx, m_pathLen);
 }
 
@@ -258,7 +317,7 @@ auto Uri::query() const -> std::string_view
 	if(!hasQuery())
 		return {};
 
-	const auto queryIdx = std::size_t(m_schemeLen + m_authorityLen + m_pathLen);
+	const auto queryIdx = m_schemeLen + m_authorityLen + m_pathLen;
 	return std::string_view(m_data).substr(queryIdx, m_queryLen);
 }
 
@@ -267,7 +326,7 @@ auto Uri::fragment() const -> std::string_view
 	if(!hasFragment())
 		return {};
 
-	const auto fragmentIdx = std::size_t(m_schemeLen + m_authorityLen + m_pathLen + m_queryLen);
+	const auto fragmentIdx = m_schemeLen + m_authorityLen + m_pathLen + m_queryLen;
 	return std::string_view(m_data).substr(fragmentIdx, m_fragmentLen);
 }
 
@@ -290,9 +349,6 @@ auto Uri::setAuthority(std::string_view authority) -> bool
 
 	if(len == authority.size())
 	{
-		if(path().starts_with("//"))
-			return false;
-
 		insertAuthority(authority);
 		return true;
 	}
@@ -302,7 +358,7 @@ auto Uri::setAuthority(std::string_view authority) -> bool
 
 auto Uri::setPath(std::string_view path) -> bool
 {
-	if(hasAuthority() && path.starts_with("//"))
+	if(!hasAuthority() && path.starts_with("//"))
 		return false;
 
 	insertPath(path);
@@ -349,11 +405,11 @@ void Uri::removeFragment()
 void Uri::insertScheme(std::string_view scheme)
 {
 	m_data.replace(0, m_schemeLen, scheme);
-	m_schemeLen = static_cast<std::uint16_t>(scheme.size());
+	m_schemeLen = scheme.size();
 
 	const auto toLower = [](char c) -> char{ return c >= 'A' && c <= 'Z' ? c + 32 : c; };
 
-	for(std::uint16_t i = 0; i < m_schemeLen; ++i)
+	for(std::size_t i = 0; i < m_schemeLen; ++i)
 		m_data[i] = toLower(m_data[i]);
 }
 
@@ -361,32 +417,32 @@ void Uri::insertAuthority(std::string_view authority)
 {
 	const auto authorityIdx = m_schemeLen;
 	m_data.replace(authorityIdx, m_authorityLen, authority);
-	m_authorityLen = static_cast<std::uint16_t>(authority.size());
+	m_authorityLen = authority.size();
 	normalizeEncodedCase(m_data, m_schemeLen, m_authorityLen);
 	m_hasAuthority = 1;
 }
 
 void Uri::insertPath(std::string_view path)
 {
-	const auto pathIdx = std::size_t(m_schemeLen + m_authorityLen);
+	const auto pathIdx = m_schemeLen + m_authorityLen;
 	m_data.replace(pathIdx, m_pathLen, path);
-	m_pathLen = static_cast<std::uint16_t>(path.size());
+	m_pathLen = path.size();
 }
 
 void Uri::insertQuery(std::string_view query)
 {
-	const auto queryIdx = std::size_t(m_schemeLen + m_authorityLen + m_pathLen);
+	const auto queryIdx = m_schemeLen + m_authorityLen + m_pathLen;
 	m_data.replace(queryIdx, m_queryLen, query);
-	m_queryLen = static_cast<std::uint16_t>(query.size());
+	m_queryLen = query.size();
 	normalizeEncodedCase(m_data, queryIdx, m_queryLen);
 	m_hasQuery = 1;
 }
 
 void Uri::insertFragment(std::string_view fragment)
 {
-	const auto fragmentIdx = std::size_t(m_schemeLen + m_authorityLen + m_pathLen + m_queryLen);
+	const auto fragmentIdx = m_schemeLen + m_authorityLen + m_pathLen + m_queryLen;
 	m_data.replace(fragmentIdx, m_fragmentLen, fragment);
-	m_fragmentLen = static_cast<std::uint16_t>(fragment.size());
+	m_fragmentLen = fragment.size();
 	normalizeEncodedCase(m_data, fragmentIdx, m_fragmentLen);
 	m_hasFragment = 1;
 }
@@ -396,7 +452,9 @@ auto Uri::toString() const -> std::string
 	if(!isValid())
 		return {};
 
-	const auto encodedPath = encode(path(), "/");
+	auto encodedPath = encode(path(), "/");
+	if(!hasAuthority() && encodedPath.starts_with("//"))
+		encodedPath.replace(0, 1, "%2F");
 
 	auto result = std::string();
 	result.reserve(m_data.size() - path().size() + encodedPath.size() + sizeof("://?#"));
@@ -409,7 +467,7 @@ auto Uri::toString() const -> std::string
 		result += "//";
 		result += authority();
 
-		if(!encodedPath.starts_with('/'))
+		if(!encodedPath.empty() && !encodedPath.starts_with('/'))
 			result += '/';
 	}
 
@@ -459,28 +517,46 @@ auto Uri::encode(std::string_view decoded, std::string_view exclude) -> std::str
 
 auto Uri::decode(std::string_view encoded) -> std::string
 {
+	const auto firstEscape = encoded.find('%');
+	if(firstEscape == std::string_view::npos)
+		return std::string(encoded);
 	std::string decoded;
+	decoded.reserve(encoded.size());
+	decoded.append(encoded.substr(0, firstEscape));
 
-	for(std::size_t i = 0; i < encoded.size(); ++i)
+	for(std::size_t i = firstEscape; i < encoded.size();)
 	{
-		if(encoded[i] == '%' && i + 2 < encoded.size())
+		if(encoded[i] != '%' || i + 2 >= encoded.size() || !isAlphanumeric(encoded[i + 1]) || !isAlphanumeric(encoded[i + 2]))
+		{
+			decoded += encoded[i++];
+			continue;
+		}
+		const auto begin = i;
+		const auto decodedBegin = decoded.size();
+		auto literalPrefix = std::size_t(0);
+		while(i + 2 < encoded.size() && encoded[i] == '%' && isAlphanumeric(encoded[i + 1]) && isAlphanumeric(encoded[i + 2]))
 		{
 			const char* start = encoded.data() + i + 1;
 			const char* end   = start + 2;
-
-			unsigned char c;
+			unsigned char c = 0;
 			const auto [ptr, ec] = std::from_chars(start, end, c, 16);
-
-			if(ec != std::errc{} || ptr != end)
-				return {};
-
 			decoded += static_cast<char>(c);
-			i += 2;
+			if(ec != std::errc{} || ptr != end)
+				literalPrefix = decoded.size() - decodedBegin;
+			i += 3;
 		}
-		else
+		const auto bytes = std::string_view(decoded).substr(decodedBegin);
+		for(auto offset = literalPrefix; offset < bytes.size();)
 		{
-			decoded += encoded[i];
+			const auto length = utf8SequenceLength(bytes, offset);
+			if(length == 0)
+				literalPrefix = ++offset;
+			else
+				offset += length;
 		}
+		// Failed runs retain their prefix until the remaining suffix can be decoded.
+		if(literalPrefix != 0)
+			decoded.replace(decodedBegin, literalPrefix, encoded.substr(begin, literalPrefix * 3));
 	}
 
 	return decoded;
@@ -516,6 +592,12 @@ auto Uri::operator==(const Uri& other) const -> bool
 		return false;
 
 	return true;
+}
+
+auto Uri::operator<(const Uri& other) const -> bool
+{
+	return std::tuple(scheme(), hasAuthority(), authority(), path(), hasQuery(), query(), hasFragment(), fragment()) <
+	       std::tuple(other.scheme(), other.hasAuthority(), other.authority(), other.path(), other.hasQuery(), other.query(), other.hasFragment(), other.fragment());
 }
 
 } // namespace lsp

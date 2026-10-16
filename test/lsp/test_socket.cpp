@@ -53,6 +53,13 @@ int main(int argc, char** argv)
 		test::check(listener.port() != 0, "portAssigned");
 	});
 
+	app.addTest("ListenerAcceptsConnectionBeforeAcceptCall", [](){
+		auto listener = SocketListener(0);
+		auto client = Socket::connect(Socket::Localhost, listener.port());
+		auto server = listener.accept();
+		test::check(client.isOpen() && server.isOpen());
+	});
+
 	app.addTest("ConnectAndExchangeData", [](){
 		auto listener = SocketListener(0);
 		auto [client, server] = connectPair(listener);
@@ -154,6 +161,24 @@ int main(int argc, char** argv)
 		test::expectException<Error>([&client, &buffer](){
 			client.read(buffer, sizeof(buffer));
 		});
+	});
+
+	app.addTest("WriteAfterPeerClosedThrowsWithoutSignal", [](){
+		auto listener = SocketListener(0);
+		auto [client, server] = connectPair(listener);
+		server.close();
+		char byte;
+		test::expectException<Error>([&client, &byte](){ client.read(&byte, 1); });
+		bool failed = false;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+		while(!failed && std::chrono::steady_clock::now() < deadline)
+		{
+			try{ client.write("x", 1); }
+			catch(const Error&){ failed = true; }
+			if(!failed)
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		test::check(failed);
 	});
 
 	app.addTest("MoveConstructTransfersOwnership", [](){

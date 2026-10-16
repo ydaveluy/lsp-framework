@@ -1,5 +1,9 @@
 #include <lsp/process.h>
 #include <lsp/io/stream.h>
+#include <lsp/io/sigpipe_guard.h>
+#include <algorithm>
+#include <limits>
+#include <type_traits>
 
 #ifndef LSP_PROCESS_UNSUPPORTED
 
@@ -13,6 +17,9 @@
 #include <signal.h>
 #include <sys/wait.h>
 #elif defined(LSP_PROCESS_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #endif
@@ -27,17 +34,74 @@ struct Process::Impl final : public io::Stream{
 	int   m_exitCode   = -1;
 	pid_t m_pid        = -1;
 
+	static auto createPipe(int (&fds)[2]) -> int
+	{
+#ifdef __linux__
+		if(pipe2(fds, O_CLOEXEC) == -1)
+#else
+		if(pipe(fds) == -1)
+#endif
+			return -1;
+
+		for(auto& fd : fds)
+		{
+#ifdef __linux__
+			if(fd > STDERR_FILENO)
+				continue;
+#endif
+			const auto configured = fd <= STDERR_FILENO ? fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1) : fcntl(fd, F_SETFD, FD_CLOEXEC);
+			if(configured == -1)
+			{
+				const auto error = errno;
+				close(fds[0]);
+				close(fds[1]);
+				errno = error;
+				return -1;
+			}
+			if(fd <= STDERR_FILENO)
+			{
+				close(fd);
+				fd = configured;
+			}
+		}
+		return 0;
+	}
+
+	static auto waitFor(pid_t pid, int* status, int options) -> pid_t
+	{
+		auto result = pid_t(-1);
+		do
+		{
+			result = waitpid(pid, status, options);
+		}
+		while(result == -1 && errno == EINTR);
+		return result;
+	}
+
+	void recordExitStatus(int status)
+	{
+		if(WIFEXITED(status))
+			m_exitCode = WEXITSTATUS(status);
+		else if(WIFSIGNALED(status))
+			m_exitCode = 128 + WTERMSIG(status);
+	}
+
 	Impl(const std::string& executable, const ArgList& args)
 	{
+		auto argList = std::vector<char*>({const_cast<char*>(executable.c_str())});
+		for(const auto& arg : args)
+			argList.push_back(const_cast<char*>(arg.c_str()));
+		argList.push_back(nullptr);
+
 		int inPipe[2]; // Parent writes to child (stdin)
 		int outPipe[2]; // Parent reads from child (stdout)
 		int stderrPipe[2]; // Parent reads from child (stderr)
 		int errPipe[2]; // Used to inform parent about exec errors
 
-		if(pipe(inPipe) == -1)
+		if(createPipe(inPipe) == -1)
 			throw ProcessError(strerror(errno));
 
-		if(pipe(outPipe) == -1)
+		if(createPipe(outPipe) == -1)
 		{
 			const auto error = errno;
 			close(inPipe[0]);
@@ -45,7 +109,7 @@ struct Process::Impl final : public io::Stream{
 			throw ProcessError(strerror(error));
 		}
 
-		if(pipe(stderrPipe) == -1)
+		if(createPipe(stderrPipe) == -1)
 		{
 			const auto error = errno;
 			close(inPipe[0]);
@@ -55,7 +119,7 @@ struct Process::Impl final : public io::Stream{
 			throw ProcessError(strerror(error));
 		}
 
-		if(pipe(errPipe) == -1)
+		if(createPipe(errPipe) == -1)
 		{
 			const auto error = errno;
 			close(inPipe[0]);
@@ -66,13 +130,6 @@ struct Process::Impl final : public io::Stream{
 			close(stderrPipe[1]);
 			throw ProcessError(strerror(error));
 		}
-
-		auto argList = std::vector<char*>({const_cast<char*>(executable.c_str())});
-
-		for(const auto& arg : args)
-			argList.push_back(const_cast<char*>(arg.c_str()));
-
-		argList.push_back(nullptr);
 
 		const char* const file = executable.c_str();
 		char** const      argv = argList.data();
@@ -83,20 +140,30 @@ struct Process::Impl final : public io::Stream{
 
 		if(m_pid == -1)
 		{
+			const auto error = errno;
 			close(inPipe[0]);
 			close(inPipe[1]);
 			close(outPipe[0]);
 			close(outPipe[1]);
 			close(stderrPipe[0]);
 			close(stderrPipe[1]);
-			throw ProcessError(strerror(errno));
+			close(errPipe[0]);
+			close(errPipe[1]);
+			throw ProcessError(strerror(error));
 		}
 
 		if(m_pid == 0) // Child process
 		{
-			dup2(inPipe[0], STDIN_FILENO);
-			dup2(outPipe[1], STDOUT_FILENO);
-			dup2(stderrPipe[1], STDERR_FILENO);
+			if(dup2(inPipe[0], STDIN_FILENO) == -1 ||
+			   dup2(outPipe[1], STDOUT_FILENO) == -1 ||
+			   dup2(stderrPipe[1], STDERR_FILENO) == -1)
+			{
+				const auto error = errno;
+				ssize_t result;
+				do{ result = ::write(errPipe[1], &error, sizeof(error)); }
+				while(result == -1 && errno == EINTR);
+				_exit(EXIT_FAILURE);
+			}
 
 			close(inPipe[0]);
 			close(inPipe[1]);
@@ -105,12 +172,13 @@ struct Process::Impl final : public io::Stream{
 			close(stderrPipe[0]);
 			close(stderrPipe[1]);
 			close(errPipe[0]);
-			fcntl(errPipe[1], F_SETFD, FD_CLOEXEC);
 
 			execvp(file, argv);
 
 			const auto error = errno;
-			ssize_t x = ::write(errPipe[1], &error, sizeof(error));
+			ssize_t x;
+			do{ x = ::write(errPipe[1], &error, sizeof(error)); }
+			while(x == -1 && errno == EINTR);
 			(void)x;
 
 			close(errPipe[1]);
@@ -124,33 +192,48 @@ struct Process::Impl final : public io::Stream{
 			close(stderrPipe[1]);
 			close(errPipe[1]);
 
-			int error;
-			const auto bytesRead = ::read(errPipe[0], &error, sizeof(error));
+			int error = 0;
+			ssize_t bytesRead;
+			do{ bytesRead = ::read(errPipe[0], &error, sizeof(error)); }
+			while(bytesRead == -1 && errno == EINTR);
+			if(bytesRead == -1)
+				error = errno;
 			close(errPipe[0]);
 
-			if(bytesRead > 0)
+			if(bytesRead != 0)
 			{
 				close(inPipe[1]);
 				close(outPipe[0]);
 				close(stderrPipe[0]);
-				waitpid(m_pid, nullptr, 0);
+				if(bytesRead == -1)
+					kill(m_pid, SIGKILL);
+				waitFor(m_pid, nullptr, 0);
 				throw ProcessError(strerror(error));
 			}
 
 			m_stdinWrite = inPipe[1];
 			m_stdoutRead = outPipe[0];
 			m_stderrRead = stderrPipe[0];
-			fcntl(m_stderrRead, F_SETFL, O_NONBLOCK);
+			if(fcntl(m_stderrRead, F_SETFL, O_NONBLOCK) == -1)
+			{
+				const auto error = errno;
+				closeStdHandles();
+				kill(m_pid, SIGKILL);
+				waitFor(m_pid, nullptr, 0);
+				m_pid = -1;
+				throw ProcessError(strerror(error));
+			}
 		}
 	}
 
 	~Impl()
 	{
-		if(checkRunning())
+		const auto running = checkRunning();
+		closeStdHandles();
+		if(running)
 		{
-			closeStdHandles();
 			kill(m_pid, SIGKILL);
-			waitpid(m_pid, nullptr, 0);
+			waitFor(m_pid, nullptr, 0);
 			m_pid = -1;
 		}
 	}
@@ -185,11 +268,10 @@ struct Process::Impl final : public io::Stream{
 	{
 		if(m_pid != -1)
 		{
-			int status;
-			const auto pid = waitpid(m_pid, &status, WNOHANG);
-
-			if(WIFEXITED(status))
-				m_exitCode = WEXITSTATUS(status);
+			int status = 0;
+			const auto pid = waitFor(m_pid, &status, WNOHANG);
+			if(pid > 0)
+				recordExitStatus(status);
 
 			if(pid != 0)
 			{
@@ -203,17 +285,16 @@ struct Process::Impl final : public io::Stream{
 
 	auto wait() -> int
 	{
-		if(checkRunning())
+		const auto running = checkRunning();
+		closeStdHandles();
+		if(running)
 		{
-			closeStdHandles();
-			int status;
-			waitpid(m_pid, &status, 0);
+			int status = 0;
+			const auto pid = waitFor(m_pid, &status, 0);
 			m_pid = -1;
 
-			if(WIFEXITED(status))
-				m_exitCode = WEXITSTATUS(status);
-			else if(WIFSIGNALED(status))
-				m_exitCode = 128 + WTERMSIG(status);
+			if(pid > 0)
+				recordExitStatus(status);
 		}
 
 		return m_exitCode;
@@ -221,11 +302,12 @@ struct Process::Impl final : public io::Stream{
 
 	void terminate()
 	{
-		if(checkRunning())
+		const auto running = checkRunning();
+		closeStdHandles();
+		if(running)
 		{
-			closeStdHandles();
 			kill(m_pid, SIGTERM);
-			waitpid(m_pid, nullptr, 0);
+			waitFor(m_pid, nullptr, 0);
 			m_pid = -1;
 		}
 	}
@@ -242,7 +324,7 @@ struct Process::Impl final : public io::Stream{
 
 	static auto exists(int id) -> bool
 	{
-		return id > 0 && kill(static_cast<pid_t>(id), 0) == 0;
+		return id > 0 && (kill(static_cast<pid_t>(id), 0) == 0 || errno == EPERM);
 	}
 
 	void read(char* buffer, std::size_t size) override
@@ -251,7 +333,8 @@ struct Process::Impl final : public io::Stream{
 
 		while(totalBytesRead < size)
 		{
-			const auto bytesRead = ::read(m_stdoutRead, buffer + totalBytesRead, size - totalBytesRead);
+			const auto remaining = std::min(size - totalBytesRead, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+			const auto bytesRead = ::read(m_stdoutRead, buffer + totalBytesRead, remaining);
 
 			if(bytesRead < 0)
 			{
@@ -304,22 +387,39 @@ struct Process::Impl final : public io::Stream{
 
 	void write(const char* buffer, std::size_t size) override
 	{
+		if(size == 0)
+			return;
+
+		auto signalGuard = io::detail::SigpipeGuard();
+		if(signalGuard.error() != 0)
+			throw io::Error(strerror(signalGuard.error()));
+		auto error = 0;
 		std::size_t totalBytesWritten = 0;
 
 		while(totalBytesWritten < size)
 		{
-			const auto bytesWritten = ::write(m_stdinWrite, buffer + totalBytesWritten, size - totalBytesWritten);
+			const auto remaining = std::min(size - totalBytesWritten, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+			const auto bytesWritten = ::write(m_stdinWrite, buffer + totalBytesWritten, remaining);
 
 			if(bytesWritten < 0)
 			{
 				if(errno == EINTR)
 					continue;
 
-				throw io::Error(std::string("Failed to write to process stdin: ") + strerror(errno));
+				error = errno;
+				break;
+			}
+			if(bytesWritten == 0)
+			{
+				error = EIO;
+				break;
 			}
 
 			totalBytesWritten += static_cast<std::size_t>(bytesWritten);
 		}
+		signalGuard.failedWith(error);
+		if(error != 0)
+			throw io::Error(std::string("Failed to write to process stdin: ") + strerror(error));
 	}
 #elif defined(LSP_PROCESS_WIN32)
 	HANDLE              m_stdinRead    = nullptr;
@@ -379,13 +479,15 @@ struct Process::Impl final : public io::Stream{
 
 		for(const auto& arg : args)
 			cmdLine += ' ' + escapeArg(arg);
+		if(cmdLine.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+			throw ProcessError("Process command line is too long");
 
 		std::wstring wCmdLine;
-		wCmdLine.resize(cmdLine.size() * 4);
+		wCmdLine.resize(cmdLine.size());
 
-		const auto len = MultiByteToWideChar(CP_UTF8, 0, cmdLine.data(), static_cast<int>(cmdLine.size()), wCmdLine.data(), static_cast<int>(wCmdLine.size()));
+		const auto len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, cmdLine.data(), static_cast<int>(cmdLine.size()), wCmdLine.data(), static_cast<int>(wCmdLine.size()));
 
-		if(len < 0)
+		if(len <= 0)
 			throw ProcessError("Failed to convert process command line");
 
 		wCmdLine.resize(static_cast<std::size_t>(len));
@@ -395,6 +497,15 @@ struct Process::Impl final : public io::Stream{
 
 	Impl(const std::string& executable, const ArgList& args)
 	{
+		auto cmdLine = buildCmdLine(executable, args);
+		SIZE_T attributeSize = 0;
+		InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeSize);
+		auto attributeStorage = std::vector<unsigned char>(attributeSize);
+		auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+		if(!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeSize))
+			throw ProcessError("Failed to initialize process handle inheritance");
+		const auto deleteAttributes = [](LPPROC_THREAD_ATTRIBUTE_LIST list){ DeleteProcThreadAttributeList(list); };
+		const auto attributeGuard = std::unique_ptr<std::remove_pointer_t<LPPROC_THREAD_ATTRIBUTE_LIST>, decltype(deleteAttributes)>(attributes, deleteAttributes);
 		auto securityAttributes = SECURITY_ATTRIBUTES{};
 		securityAttributes.nLength = sizeof(securityAttributes);
 		securityAttributes.bInheritHandle = TRUE;
@@ -402,7 +513,11 @@ struct Process::Impl final : public io::Stream{
 		if(!CreatePipe(&m_stdinRead, &m_stdinWrite, &securityAttributes, 0))
 			throw ProcessError("Failed to create stdin pipe");
 
-		SetHandleInformation(m_stdinWrite, HANDLE_FLAG_INHERIT, 0);
+		if(!SetHandleInformation(m_stdinWrite, HANDLE_FLAG_INHERIT, 0))
+		{
+			closeStdHandles();
+			throw ProcessError("Failed to configure stdin pipe inheritance");
+		}
 
 		if(!CreatePipe(&m_stdoutRead, &m_stdoutWrite, &securityAttributes, 0))
 		{
@@ -412,7 +527,11 @@ struct Process::Impl final : public io::Stream{
 			throw ProcessError("Failed to create stdin pipe");
 		}
 
-		SetHandleInformation(m_stdoutRead, HANDLE_FLAG_INHERIT, 0);
+		if(!SetHandleInformation(m_stdoutRead, HANDLE_FLAG_INHERIT, 0))
+		{
+			closeStdHandles();
+			throw ProcessError("Failed to configure stdout pipe inheritance");
+		}
 
 		if(!CreatePipe(&m_stderrRead, &m_stderrWrite, &securityAttributes, 0))
 		{
@@ -424,17 +543,26 @@ struct Process::Impl final : public io::Stream{
 			throw ProcessError("Failed to create stderr pipe");
 		}
 
-		SetHandleInformation(m_stderrRead, HANDLE_FLAG_INHERIT, 0);
+		if(!SetHandleInformation(m_stderrRead, HANDLE_FLAG_INHERIT, 0))
+		{
+			closeStdHandles();
+			throw ProcessError("Failed to configure stderr pipe inheritance");
+		}
+		auto startupInfo = STARTUPINFOEXW{};
+		startupInfo.StartupInfo.cb         = sizeof(startupInfo);
+		startupInfo.StartupInfo.dwFlags    = STARTF_USESTDHANDLES;
+		startupInfo.StartupInfo.hStdInput  = m_stdinRead;
+		startupInfo.StartupInfo.hStdOutput = m_stdoutWrite;
+		startupInfo.StartupInfo.hStdError  = m_stderrWrite;
+		startupInfo.lpAttributeList = attributes;
+		HANDLE inheritedHandles[] = {m_stdinRead, m_stdoutWrite, m_stderrWrite};
+		if(!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritedHandles, sizeof(inheritedHandles), nullptr, nullptr))
+		{
+			closeStdHandles();
+			throw ProcessError("Failed to configure process handle inheritance");
+		}
 
-		auto cmdLine = buildCmdLine(executable, args);
-		auto startupInfo = STARTUPINFOW{};
-		startupInfo.cb         = sizeof(startupInfo);
-		startupInfo.dwFlags    = STARTF_USESTDHANDLES;
-		startupInfo.hStdInput  = m_stdinRead;
-		startupInfo.hStdOutput = m_stdoutWrite;
-		startupInfo.hStdError  = m_stderrWrite;
-
-		if(!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startupInfo, &m_processInfo))
+		if(!CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &startupInfo.StartupInfo, &m_processInfo))
 		{
 			CloseHandle(m_stdinRead);
 			CloseHandle(m_stdinWrite);
@@ -448,8 +576,10 @@ struct Process::Impl final : public io::Stream{
 
 		CloseHandle(m_stdinRead);
 		CloseHandle(m_stdoutWrite);
+		CloseHandle(m_stderrWrite);
 		m_stdinRead   = nullptr;
 		m_stdoutWrite = nullptr;
+		m_stderrWrite = nullptr;
 	}
 
 	~Impl()
@@ -501,12 +631,11 @@ struct Process::Impl final : public io::Stream{
 		if(!m_processInfo.hProcess)
 			return false;
 
-		DWORD exitCode;
-
-		if(GetExitCodeProcess(m_processInfo.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
+		if(WaitForSingleObject(m_processInfo.hProcess, 0) == WAIT_TIMEOUT)
 			return true;
 
-		m_exitCode = static_cast<int>(exitCode);
+		DWORD exitCode = 0;
+		m_exitCode = GetExitCodeProcess(m_processInfo.hProcess, &exitCode) ? static_cast<int>(exitCode) : -1;
 		CloseHandle(m_processInfo.hThread);
 		CloseHandle(m_processInfo.hProcess);
 		ZeroMemory(&m_processInfo, sizeof(m_processInfo));
@@ -516,9 +645,10 @@ struct Process::Impl final : public io::Stream{
 
 	auto wait() -> int
 	{
-		if(checkRunning())
+		const auto running = checkRunning();
+		closeStdHandles();
+		if(running)
 		{
-			closeStdHandles();
 			WaitForSingleObject(m_processInfo.hProcess, INFINITE);
 			(void)checkRunning();
 		}
@@ -535,8 +665,8 @@ struct Process::Impl final : public io::Stream{
 			CloseHandle(m_processInfo.hThread);
 			CloseHandle(m_processInfo.hProcess);
 			ZeroMemory(&m_processInfo, sizeof(m_processInfo));
-			closeStdHandles();
 		}
+		closeStdHandles();
 	}
 
 	auto id() const -> int
@@ -553,12 +683,11 @@ struct Process::Impl final : public io::Stream{
 	{
 		if(id > 0)
 		{
-			const auto handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(id));
+			const auto handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, static_cast<DWORD>(id));
 
 			if(handle)
 			{
-				DWORD exitCode;
-				const auto running = GetExitCodeProcess(handle, &exitCode) && exitCode == STILL_ACTIVE;
+				const auto running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
 				CloseHandle(handle);
 
 				return running;
@@ -574,14 +703,17 @@ struct Process::Impl final : public io::Stream{
 
 		while(totalBytesRead < size)
 		{
-			DWORD bytesRead;
-			if(!ReadFile(m_stdoutRead, buffer + totalBytesRead, static_cast<DWORD>(size - totalBytesRead), &bytesRead, nullptr))
+			const auto remaining = static_cast<DWORD>(std::min(size - totalBytesRead, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+			DWORD bytesRead = 0;
+			if(!ReadFile(m_stdoutRead, buffer + totalBytesRead, remaining, &bytesRead, nullptr))
 			{
 				if(GetLastError() == ERROR_BROKEN_PIPE)
 					throw io::Error("Reached EOF");
 
 				throw io::Error(std::string("Failed to read from process stdout"));
 			}
+			if(bytesRead == 0)
+				throw io::Error("Reached EOF");
 
 			totalBytesRead += bytesRead;
 		}
@@ -621,8 +753,9 @@ struct Process::Impl final : public io::Stream{
 
 		while(totalBytesWritten < size)
 		{
-			DWORD bytesWritten;
-			if(!WriteFile(m_stdinWrite, buffer + totalBytesWritten, static_cast<DWORD>(size - totalBytesWritten), &bytesWritten, nullptr))
+			const auto remaining = static_cast<DWORD>(std::min(size - totalBytesWritten, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+			DWORD bytesWritten = 0;
+			if(!WriteFile(m_stdinWrite, buffer + totalBytesWritten, remaining, &bytesWritten, nullptr) || bytesWritten == 0)
 				throw io::Error(std::string("Failed to write to process stdin"));
 
 			totalBytesWritten += bytesWritten;
@@ -644,6 +777,9 @@ Process::Process(std::unique_ptr<Impl> impl)
 
 Process Process::start(const std::string& executable, const ArgList& args)
 {
+	if(executable.find('\0') != std::string::npos ||
+	   std::any_of(args.begin(), args.end(), [](const auto& arg){ return arg.find('\0') != std::string::npos; }))
+		throw ProcessError("Process executable and arguments must not contain null bytes");
 	return Process(std::make_unique<Process::Impl>(executable, args));
 }
 
