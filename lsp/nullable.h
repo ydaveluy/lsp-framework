@@ -4,6 +4,7 @@
 #include <utility>
 #include <variant>
 #include <optional>
+#include <type_traits>
 
 namespace lsp{
 
@@ -23,12 +24,16 @@ public:
 
 	auto operator=(const T& t) -> Nullable&
 	{
+		if(m_value && std::addressof(t) == std::addressof(*m_value))
+			return *this;
 		m_value.emplace(t);
 		return *this;
 	}
 
 	auto operator=(T&& t) -> Nullable&
 	{
+		if(m_value && std::addressof(t) == std::addressof(*m_value))
+			return *this;
 		m_value.emplace(std::forward<T>(t));
 		return *this;
 	}
@@ -77,14 +82,15 @@ public:
 	template<typename T>
 	auto operator=(const T& t) -> NullableVariant&
 	{
-		m_value.emplace(t);
+		replaceValue(t);
 		return *this;
 	}
 
 	template<typename T>
+	requires (!std::is_same_v<std::remove_cvref_t<T>, NullableVariant>)
 	auto operator=(T&& t) -> NullableVariant&
 	{
-		m_value.emplace(std::forward<T>(t));
+		replaceValue(std::forward<T>(t));
 		return *this;
 	}
 
@@ -133,6 +139,35 @@ public:
 
 private:
 	std::optional<VariantType> m_value;
+
+	template<typename T>
+	void replaceValue(T&& t)
+	{
+		constexpr auto sourceIsAlternative = ((std::is_same_v<std::remove_cvref_t<T>, Args> &&
+			std::is_convertible_v<T&&, Args>) || ...);
+		constexpr auto maySelectImmobile = ((std::is_convertible_v<T&&, Args> &&
+			!std::is_move_constructible_v<Args> && !std::is_copy_constructible_v<Args>) || ...);
+
+		// In-place tags and immobile alternatives retain direct construction.
+		if constexpr(!std::is_convertible_v<T&&, VariantType> || (!sourceIsAlternative && maySelectImmobile))
+			m_value.emplace(std::forward<T>(t));
+		else
+		{
+			auto replacement = VariantType(std::forward<T>(t));
+			if constexpr(std::is_move_constructible_v<VariantType>)
+				m_value.emplace(std::move(replacement));
+			else if constexpr(std::is_copy_constructible_v<VariantType>)
+				m_value.emplace(replacement);
+			else
+				std::visit([this](auto& value){
+					using U = std::remove_cvref_t<decltype(value)>;
+					if constexpr(std::is_constructible_v<VariantType, std::in_place_type_t<U>, U&&>)
+						m_value.emplace(std::in_place_type<U>, std::move(value));
+					else if constexpr(std::is_constructible_v<VariantType, std::in_place_type_t<U>, U&>)
+						m_value.emplace(std::in_place_type<U>, value);
+				}, replacement);
+		}
+	}
 };
 
 } // namespace lsp

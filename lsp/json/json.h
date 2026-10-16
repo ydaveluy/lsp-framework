@@ -137,24 +137,10 @@ public:
 	requires (std::integral<T> && !std::same_as<T, Boolean>)
 	constexpr Value(T i)
 	{
-		using Common = std::common_type_t<T, Integer>;
-
-		if(static_cast<Common>(i) > static_cast<Common>(std::numeric_limits<Integer>::max()))
-		{
+		if(std::in_range<Integer>(static_cast<std::common_type_t<T, Integer>>(i)))
+			m_variant = static_cast<Integer>(i);
+		else
 			m_variant = static_cast<Decimal>(i);
-			return;
-		}
-
-		if constexpr(std::unsigned_integral<T>)
-		{
-			if(static_cast<Common>(i) < static_cast<Common>(std::numeric_limits<Integer>::min()))
-			{
-				m_variant = static_cast<Decimal>(i);
-				return;
-			}
-		}
-
-		m_variant = static_cast<Integer>(i);
 	}
 
 	template<std::floating_point T>

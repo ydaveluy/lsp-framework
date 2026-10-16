@@ -1,3 +1,4 @@
+#include <limits>
 #include <test/test.h>
 #include <lsp/json/json.h>
 
@@ -357,6 +358,29 @@ int main(int argc, char** argv)
 	app.addTest("Parse/Error", []()
 	{
 		test::expectException<ParseError>([](){ (void)parse("{"); });
+	});
+
+	app.addTest("Value/IntegerRange", [](){
+		test::check(Value(42u).isInteger());
+		test::compare(Value(42u).integer(), 42);
+		test::check(Value('A').isInteger());
+		test::compare(Value(-2147483649LL).number(), -2147483649.0);
+		test::compare(Value(2147483648ULL).number(), 2147483648.0);
+		test::compare(Value(std::numeric_limits<long long>::min()).number(),
+			static_cast<double>(std::numeric_limits<long long>::min()));
+		test::compare(Value(std::numeric_limits<unsigned long long>::max()).number(),
+			static_cast<double>(std::numeric_limits<unsigned long long>::max()));
+	});
+
+	app.addTest("Object/EqualityWithDuplicateKeys", [](){
+		const auto original = Object{{"x", 1}, {"x", 2}, {"y", true}};
+		const auto copy = original;
+		const auto reordered = Object{{"y", true}, {"x", 2}, {"x", 1}};
+		const auto differentMultiplicity = Object{{"x", 1}, {"x", 1}, {"y", true}};
+		test::check(original == original);
+		test::check(original == copy && copy == original);
+		test::check(original == reordered && reordered == original);
+		test::check(original != differentMultiplicity && differentMultiplicity != original);
 	});
 
 	return app.main(argc, argv);

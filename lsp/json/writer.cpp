@@ -12,8 +12,17 @@ void appendStringLiteral(std::string_view str, std::string& out)
 	out.reserve(out.size() + str.size() + 2);
 	out += '\"';
 
-	for(const char c : str)
+	const auto end = str.end();
+	auto segment = str.begin();
+	for(auto it = segment; it != end; ++it)
 	{
+		const char c = *it;
+		if(static_cast<unsigned char>(c) >= 0x20 && c != '"' && c != '\\' && static_cast<unsigned char>(c) != 0xED)
+			continue;
+
+		if(segment != it)
+			out.append(segment, static_cast<std::size_t>(it - segment));
+
 		switch(c)
 		{
 		case '\b':
@@ -37,6 +46,24 @@ void appendStringLiteral(std::string_view str, std::string& out)
 		case '\\':
 			out += "\\\\";
 			break;
+		case static_cast<char>(0xED):
+			if(end - it >= 3 &&
+				static_cast<unsigned char>(it[1]) >= 0xA0 &&
+				static_cast<unsigned char>(it[1]) <= 0xBF &&
+				(static_cast<unsigned char>(it[2]) & 0xC0) == 0x80)
+			{
+				const auto codepoint = 0xD000u | ((static_cast<unsigned char>(it[1]) & 0x3Fu) << 6) |
+					(static_cast<unsigned char>(it[2]) & 0x3Fu);
+				constexpr auto hexLookup = "0123456789ABCDEF";
+				out += "\\u";
+				out += hexLookup[(codepoint >> 12) & 0xF];
+				out += hexLookup[(codepoint >> 8) & 0xF];
+				out += hexLookup[(codepoint >> 4) & 0xF];
+				out += hexLookup[codepoint & 0xF];
+				it += 2;
+				break;
+			}
+			[[fallthrough]];
 		default:
 			if(static_cast<unsigned char>(c) < 0x20)
 			{
@@ -50,7 +77,11 @@ void appendStringLiteral(std::string_view str, std::string& out)
 				out += c;
 			}
 		}
+		segment = it + 1;
 	}
+
+	if(segment != end)
+		out.append(segment, static_cast<std::size_t>(end - segment));
 
 	out += '\"';
 }

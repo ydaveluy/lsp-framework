@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+namespace lsp::jsonrpc{ class BatchWriter; }
+
 namespace lsp::json{
 
 class ObjectWriter;
@@ -19,6 +21,7 @@ using Array = std::vector<Value>;
  */
 
 class Writer{
+	friend class lsp::jsonrpc::BatchWriter;
 	friend class ObjectWriter;
 	friend class ArrayWriter;
 public:
@@ -59,7 +62,7 @@ public:
 private:
 	std::string            m_text;
 	int                    m_nestingLevel = 0;
-	const std::string_view m_indent;
+	const std::string      m_indent;
 	const std::string_view m_keySep;
 	const std::string_view m_valueSep;
 	const std::string_view m_newline;
@@ -135,6 +138,7 @@ private:
  */
 
 class ArrayWriter{
+	friend class lsp::jsonrpc::BatchWriter;
 	friend class Writer;
 public:
 	~ArrayWriter();

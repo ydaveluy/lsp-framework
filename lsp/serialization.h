@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -113,17 +115,72 @@ const char** requiredProperties()
 	return properties;
 }
 
-inline void fromJson(json::Value&&, std::nullptr_t){}
+namespace impl{
+
+// LSP uinteger has at most 31 value bits.
+constexpr auto UintegerDigits = std::min(31, std::numeric_limits<unsigned int>::digits);
+constexpr auto UintegerMax = static_cast<unsigned int>((1ULL << UintegerDigits) - 1);
+
+inline void validateUinteger(unsigned int value)
+{
+	if(value > UintegerMax)
+		throw json::TypeError("LSP uinteger is outside the expected range");
+}
+
+template<typename T>
+auto canDeserializeNumber(const json::Value& json) -> bool
+{
+	if(!json.isNumber())
+		return false;
+
+	const auto number = json.number();
+	if constexpr(std::is_integral_v<T>)
+	{
+		constexpr auto digits = std::is_same_v<T, unsigned int> ? UintegerDigits : std::numeric_limits<T>::digits;
+		const auto upperBound = std::ldexp(1.0, digits);
+		const auto lowerBound = std::is_signed_v<T> ? -upperBound : 0.0;
+		return std::isfinite(number) && std::trunc(number) == number &&
+			number >= lowerBound && number < upperBound;
+	}
+	else
+	{
+		return std::isfinite(number) && number >= std::numeric_limits<T>::lowest() &&
+			number <= std::numeric_limits<T>::max();
+	}
+}
+
+template<typename T>
+void numberFromJson(json::Value&& json, T& value)
+{
+	const auto number = json.number();
+	if(!canDeserializeNumber<T>(json))
+		throw json::TypeError("JSON number is outside the expected range");
+	value = static_cast<T>(number);
+}
+
+} // namespace impl
+
+inline void fromJson(json::Value&& json, std::nullptr_t)
+{
+	if(!json.isNull())
+		throw json::TypeError("JSON value is not null");
+}
 inline void fromJson(json::Value&& json, bool& value){ value = json.boolean(); }
-inline void fromJson(json::Value&& json, int& value){ value = static_cast<int>(json.number()); }
-inline void fromJson(json::Value&& json, unsigned int& value){ value = static_cast<unsigned int>(json.number()); }
-inline void fromJson(json::Value&& json, long& value){ value = static_cast<long>(json.number()); }
-inline void fromJson(json::Value&& json, unsigned long& value){ value = static_cast<unsigned long>(json.number()); }
-inline void fromJson(json::Value&& json, unsigned long long& value){ value = static_cast<unsigned long long>(json.number()); }
-inline void fromJson(json::Value&& json, float& value){ value = static_cast<float>(json.number()); }
-inline void fromJson(json::Value&& json, double& value){ value = static_cast<double>(json.number()); }
+inline void fromJson(json::Value&& json, int& value){ impl::numberFromJson(std::move(json), value); }
+inline void fromJson(json::Value&& json, unsigned int& value){ impl::numberFromJson(std::move(json), value); }
+inline void fromJson(json::Value&& json, long& value){ impl::numberFromJson(std::move(json), value); }
+inline void fromJson(json::Value&& json, unsigned long& value){ impl::numberFromJson(std::move(json), value); }
+inline void fromJson(json::Value&& json, unsigned long long& value){ impl::numberFromJson(std::move(json), value); }
+inline void fromJson(json::Value&& json, float& value){ impl::numberFromJson(std::move(json), value); }
+inline void fromJson(json::Value&& json, double& value){ impl::numberFromJson(std::move(json), value); }
 inline void fromJson(json::Value&& json, std::string& value){ value = std::move(json.string()); }
-inline void fromJson(json::Value&& json, Uri& value){ value = Uri::parse(json.string()); }
+inline void fromJson(json::Value&& json, Uri& value)
+{
+	auto uri = Uri::parse(json.string());
+	if(!uri.isValid())
+		throw json::TypeError("JSON value is not a valid URI");
+	value = std::move(uri);
+}
 inline void fromJson(json::Value&& json, json::Value& v){ v = std::move(json); }
 inline void fromJson(json::Value&& json, json::Object& v){ v = std::move(json.object()); }
 inline void fromJson(json::Value&& json, json::Array& v){ v = std::move(json.array()); }
@@ -133,6 +190,9 @@ void fromJson(json::Value&& json, std::tuple<Args...>& value);
 
 template<typename K, typename T>
 void fromJson(json::Value&& json, std::unordered_map<K, T>& value);
+
+template<typename T>
+void fromJson(json::Value&& json, std::unordered_map<Uri, T>& value);
 
 template<typename T>
 void fromJson(json::Value&& json, std::vector<T>& value);
@@ -236,11 +296,15 @@ auto canDeserializeTypeFromJson(const json::Value& json) -> bool
 	}
 	else if constexpr(std::is_integral_v<T> || std::is_floating_point_v<T>)
 	{
-		return json.isNumber();
+		return canDeserializeNumber<T>(json);
 	}
-	else if constexpr(std::is_same_v<T, std::string>)
+	else if constexpr(std::is_same_v<T, std::string> || std::is_same_v<T, Uri>)
 	{
 		return json.isString();
+	}
+	else if constexpr(std::is_same_v<T, json::Value>)
+	{
+		return true;
 	}
 	else if constexpr(IsNullable<T>{})
 	{
@@ -251,7 +315,9 @@ auto canDeserializeTypeFromJson(const json::Value& json) -> bool
 		if(json.isArray())
 		{
 			const auto& array = json.array();
-			return array.empty() || canDeserializeTypeFromJson<typename T::value_type>(array[0]);
+			return std::all_of(array.begin(), array.end(), [](const auto& value){
+				return canDeserializeTypeFromJson<typename T::value_type>(value);
+			});
 		}
 
 		return false;
@@ -264,7 +330,7 @@ auto canDeserializeTypeFromJson(const json::Value& json) -> bool
 	{
 		if constexpr(std::is_integral_v<typename T::ValueType>)
 		{
-			return json.isNumber();
+			return canDeserializeNumber<typename T::ValueType>(json);
 		}
 		else
 		{
@@ -326,15 +392,14 @@ auto canDeserializeTupleFromJson(const json::Array& array) -> bool
 			return false;
 	}
 
-	using T = std::tuple_element_t<Index, TupleType>;
-
-	if(canDeserializeTypeFromJson<T>(array[Index]))
+	if constexpr(Index == std::tuple_size_v<TupleType>)
 		return true;
-
-	if constexpr(Index + 1 < std::tuple_size_v<TupleType>)
-		return canDeserializeTupleFromJson<Index + 1, TupleType>(array);
 	else
-		return false;
+	{
+		using T = std::tuple_element_t<Index, TupleType>;
+		return canDeserializeTypeFromJson<T>(array[Index]) &&
+			canDeserializeTupleFromJson<Index + 1, TupleType>(array);
+	}
 }
 
 template<std::size_t Index, typename VariantType>
@@ -356,10 +421,46 @@ void variantFromJson(json::Value&& json, VariantType& variant, const std::size_t
 {
 	if(Index == idx)
 	{
-		if(variant.index() != Index)
-			variant.template emplace<Index>();
+		using T = std::variant_alternative_t<Index, VariantType>;
+		if constexpr(!std::is_move_constructible_v<T> && !std::is_copy_constructible_v<T>)
+		{
+			if(variant.index() != Index)
+				variant.template emplace<Index>();
+			fromJson(std::move(json), std::get<Index>(variant));
+		}
+		else
+		{
+			auto candidate = T();
+			const auto commit = [&](){
+				if constexpr(std::is_move_constructible_v<T>)
+					variant.template emplace<Index>(std::move(candidate));
+				else
+					variant.template emplace<Index>(candidate);
+			};
 
-		fromJson(std::move(json), std::get<Index>(variant));
+			if constexpr(Index + 1 < std::variant_size_v<VariantType>)
+			{
+				const auto next = deserializableVariantIndex<Index + 1, VariantType>(json);
+				if(next != std::variant_npos)
+				{
+					auto copy = json;
+					try
+					{
+						fromJson(std::move(copy), candidate);
+					}
+					catch(const json::TypeError&)
+					{
+						variantFromJson<Index + 1>(std::move(json), variant, next);
+						return;
+					}
+					commit();
+					return;
+				}
+			}
+
+			fromJson(std::move(json), candidate);
+			commit();
+		}
 	}
 	else
 	{
@@ -379,6 +480,9 @@ void variantFromJson(json::Value&& json, VariantType& variant, const std::size_t
 template<typename T, json::SimpleWriter WriterType>
 void writeJson(const T& value, WriterType& writer)
 {
+	if constexpr(std::is_same_v<T, unsigned int>)
+		impl::validateUinteger(value);
+
 	if constexpr(json::JsonPrimitive<T>)
 	{
 		writer.write(value);
@@ -393,6 +497,9 @@ void writeJson(const T& value, WriterType& writer)
 template<typename T>
 void writeJson(std::string_view key, const T& value, json::ObjectWriter& objectWriter)
 {
+	if constexpr(std::is_same_v<T, unsigned int>)
+		impl::validateUinteger(value);
+
 	if constexpr(json::JsonPrimitive<T>)
 	{
 		objectWriter.write(key, value);
@@ -571,22 +678,13 @@ inline void writeJson(const Uri& uri, json::ArrayWriter& arrayWriter)
  * std::optional writeJson
  */
 
-template<typename T>
-void writeJson(const std::optional<T>& opt, json::Writer& writer)
+template<typename T, json::SimpleWriter WriterType>
+void writeJson(const std::optional<T>& opt, WriterType& writer)
 {
 	if(opt.has_value())
 		writeJson(opt.value(), writer);
 	else
 		writer.write(nullptr);
-}
-
-template<typename T>
-void writeJson(const std::optional<T>& opt, json::ArrayWriter& arrayWriter)
-{
-	if(opt.has_value())
-		writeJson(opt.value(), arrayWriter);
-	else
-		arrayWriter.write(nullptr);
 }
 
 template<typename T>
@@ -602,22 +700,13 @@ void writeJson(std::string_view key, const std::optional<T>& opt, json::ObjectWr
  * std::unique_ptr writeJson
  */
 
-template<typename T>
-void writeJson(const std::unique_ptr<T>& opt, json::Writer& writer)
+template<typename T, json::SimpleWriter WriterType>
+void writeJson(const std::unique_ptr<T>& opt, WriterType& writer)
 {
 	if(opt)
 		writeJson(*opt, writer);
 	else
 		writer.write(nullptr);
-}
-
-template<typename T>
-void writeJson(const std::unique_ptr<T>& opt, json::ArrayWriter& arrayWriter)
-{
-	if(opt)
-		writeJson(*opt, arrayWriter);
-	else
-		arrayWriter.write(nullptr);
 }
 
 template<typename T>
@@ -653,6 +742,7 @@ template<typename K, typename T>
 void fromJson(json::Value&& json, std::unordered_map<K, T>& value)
 {
 	auto& obj = json.object();
+	value.clear();
 	value.reserve(obj.size());
 
 	for(auto&& [k, v] : obj)
@@ -663,14 +753,16 @@ template<typename T>
 void fromJson(json::Value&& json, std::unordered_map<Uri, T>& value)
 {
 	auto& obj = json.object();
+	value.clear();
 	value.reserve(obj.size());
 
 	for(auto&& [k, v] : obj)
 	{
 		auto uri = Uri::parse(k);
 
-		if(uri.isValid())
-			fromJson(std::move(v), value[Uri::parse(k)]);
+		if(!uri.isValid())
+			throw json::TypeError("JSON object key is not a valid URI");
+		fromJson(std::move(v), value[std::move(uri)]);
 	}
 }
 
@@ -678,10 +770,22 @@ template<typename T>
 void fromJson(json::Value&& json, std::vector<T>& value)
 {
 	auto& array = json.array();
+	value.clear();
 	value.reserve(array.size());
 
 	for(auto&& e : array)
-		fromJson(std::move(e), value.emplace_back());
+	{
+		if constexpr(std::is_same_v<T, bool>)
+		{
+			bool element;
+			fromJson(std::move(e), element);
+			value.push_back(element);
+		}
+		else
+		{
+			fromJson(std::move(e), value.emplace_back());
+		}
+	}
 }
 
 template<typename... Args>

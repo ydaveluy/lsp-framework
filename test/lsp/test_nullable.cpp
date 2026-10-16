@@ -1,9 +1,24 @@
 #include <string>
+#include <memory>
 #include <variant>
 #include <test/test.h>
 #include <lsp/nullable.h>
 
 using namespace lsp;
+
+namespace{
+
+struct Immobile{
+	int payload = -1;
+	Immobile() = default;
+	Immobile(std::unique_ptr<int> value) : payload(value ? *value : -1){}
+	Immobile(const std::string&){}
+	explicit Immobile(const char*){}
+	Immobile(const Immobile&) = delete;
+	Immobile(Immobile&&) = delete;
+};
+
+}
 
 int main(int argc, char** argv)
 {
@@ -168,6 +183,59 @@ int main(int argc, char** argv)
 	app.addTest("NullableVariant::ConstGet", [](){
 		const auto n = NullableVariant<int, std::string>(std::string("const"));
 		test::compare(n.get<std::string>(), "const");
+	});
+
+	app.addTest("NullableVariant::CopyAssignmentFromMutableWrapper", [](){
+		auto source = NullableVariant<int, std::string>(7);
+		auto target = NullableVariant<int, std::string>();
+		target = source;
+		test::compare(target.get<int>(), 7);
+		source.reset();
+		test::compare(target.get<int>(), 7);
+		target = source;
+		test::check(target.isNull());
+	});
+
+	app.addTest("Nullable::AssignmentFromContainedValue", [](){
+		auto value = Nullable<std::string>(std::string(1000, 'x'));
+		value = *value;
+		test::compare(value.value(), std::string(1000, 'x'));
+		value = std::move(*value);
+		test::compare(value.value(), std::string(1000, 'x'));
+	});
+
+	app.addTest("NullableVariant::AssignmentFromContainedValue", [](){
+		auto value = NullableVariant<int, std::string>(std::string(1000, 'x'));
+		value = value.get<std::string>();
+		test::compare(value.get<std::string>(), std::string(1000, 'x'));
+		value = std::move(value.get<std::string>());
+		test::compare(value.get<std::string>(), std::string(1000, 'x'));
+		value = value.value();
+		test::compare(value.get<std::string>(), std::string(1000, 'x'));
+	});
+
+	app.addTest("NullableVariant::AssignmentFromAliasedStringData", [](){
+		auto value = NullableVariant<int, std::string>(std::string(1000, 'x'));
+		value = value.get<std::string>().c_str();
+		test::compare(value.get<std::string>(), std::string(1000, 'x'));
+		value = value.get<std::string>().c_str() + 1;
+		test::compare(value.get<std::string>(), std::string(999, 'x'));
+	});
+
+	app.addTest("NullableVariant::AssignmentWithImmobileAlternative", [](){
+		auto value = NullableVariant<Immobile, std::string>();
+		value = std::string(1000, 'x');
+		value = value.get<std::string>();
+		value = value.get<std::string>().c_str();
+		test::compare(value.get<std::string>(), std::string(1000, 'x'));
+		value = value.get<std::string>().c_str() + 1;
+		test::compare(value.get<std::string>(), std::string(999, 'x'));
+		value = std::make_unique<int>(42);
+		test::compare(value.get<Immobile>().payload, 42);
+		value = std::in_place_type<Immobile>;
+		test::compare(value.get<Immobile>().payload, -1);
+		value = std::in_place_index<0>;
+		test::compare(value.get<Immobile>().payload, -1);
 	});
 
 	return app.main(argc, argv);

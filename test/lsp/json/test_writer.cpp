@@ -483,5 +483,28 @@ int main(int argc, char** argv)
 		test::compare(out, "[\n\t[]\n]");
 	});
 
+	app.addTest("Format/OwnsIndent", [](){
+		auto writer = Writer(std::string(80, ' '));
+		{
+			auto array = writer.beginArray();
+			array.write(1);
+		}
+		test::compare(writer.text(), "[\n" + std::string(80, ' ') + "1\n]");
+	});
+
+	app.addTest("String/LoneSurrogateRoundTrip", [](std::string_view text){
+		const auto parsed = parse(text);
+		const auto encoded = stringify(parsed);
+		test::compare(parse(encoded), parsed);
+		test::check(encoded.find("\\u") != std::string::npos);
+		for(const char c : encoded)
+			test::check(static_cast<unsigned char>(c) < 0x80);
+	})({
+		{"High", {R"("\uD800")"}},
+		{"Low", {R"("\uDC00")"}},
+		{"HighBeforeAscii", {R"("\uD800x")"}},
+		{"HighBeforeHigh", {R"("\uD800\uD800")"}},
+	});
+
 	return app.main(argc, argv);
 }

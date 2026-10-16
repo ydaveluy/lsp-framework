@@ -8,7 +8,7 @@ namespace{
 
 auto isWhitespace(char c) -> bool
 {
-	return c <= 0x20; // Not 'correct' but good enough for this case
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
 auto isDigit(char c) -> bool
@@ -76,8 +76,8 @@ struct Parser::StateStackEntry{
 };
 
 Parser::Parser(std::string_view text)
-	: m_start(text.data())
-	, m_end(text.data() + text.size())
+	: m_start(text.empty() ? "" : text.data())
+	, m_end(m_start + text.size())
 	, m_pos(m_start)
 {
 	m_stateStack.reserve(10);
@@ -148,17 +148,26 @@ void Parser::handleValue()
 {
 	assert(currentState() == State::Value);
 
-	if(*m_pos == '{')
+	const char c = *m_pos;
+	if(c == '{' || c == '[')
 	{
 		++m_pos;
-		currentValue() = Object{};
-		pushState(State::Object, currentValue());
-	}
-	else if(*m_pos == '[')
-	{
-		++m_pos;
-		currentValue() = Array{};
-		pushState(State::Array, currentValue());
+
+		// Value destruction is recursive even though parsing is iterative.
+		constexpr std::size_t maxNestingDepth = 512;
+		if(m_stateStack.size() / 2 >= maxNestingDepth)
+			throw ParseError("Maximum JSON nesting depth exceeded", currentTextOffset());
+
+		if(c == '{')
+		{
+			currentValue() = Object{};
+			pushState(State::Object, currentValue());
+		}
+		else
+		{
+			currentValue() = Array{};
+			pushState(State::Array, currentValue());
+		}
 	}
 	else
 	{
@@ -209,7 +218,7 @@ void Parser::handleObjectKey()
 
 	skipWhitespace();
 
-	if(!atEnd() && *m_pos != ':')
+	if(atEnd() || *m_pos != ':')
 		throw ParseError("Expected ':'", currentTextOffset());
 
 	++m_pos;
@@ -288,8 +297,13 @@ auto Parser::parseString() -> String
 
 	for(;;)
 	{
-		if(atEnd() || *m_pos == '\n')
-			throw ParseError("Unmatched '\"'", textOffset(stringStart));
+		if(atEnd() || static_cast<unsigned char>(*m_pos) < 0x20)
+		{
+			if(atEnd() || *m_pos == '\n')
+				throw ParseError("Unmatched '\"'", textOffset(stringStart));
+
+			throw ParseError("Unescaped control character", currentTextOffset());
+		}
 
 		if(!hasEscape && *m_pos == '"')
 		{
@@ -345,16 +359,26 @@ auto Parser::parseString() -> String
 				break;
 			case 'u':
 				{
-					const auto* first = str.data() + i + 1;
-					const auto* last  = first + 4;
-
-					if(last <= str.data() + str.size())
+					if(str.size() - i >= 5)
 					{
+						const auto* first = str.data() + i + 1;
+						const auto* last  = first + 4;
 						unsigned int codepoint;
 						const auto [ptr, ec] = std::from_chars(first, last, codepoint, 16);
 
 						if(ec == std::errc{} && ptr == last)
 						{
+							if(codepoint >= 0xD800 && codepoint <= 0xDBFF &&
+								str.size() - i >= 11 && str[i + 5] == '\\' && str[i + 6] == 'u')
+							{
+								unsigned int low;
+								const auto [lowPtr, lowEc] = std::from_chars(first + 6, last + 6, low, 16);
+								if(lowEc == std::errc{} && lowPtr == last + 6 && low >= 0xDC00 && low <= 0xDFFF)
+								{
+									codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
+									i += 6;
+								}
+							}
 							appendCodePointAsUtf8(result, codepoint);
 							i += 4;
 							break;
@@ -365,15 +389,9 @@ auto Parser::parseString() -> String
 			default:
 				{
 					const char* invalidEscapeStart = stringStart + i;
-					const char* invalidEscapeEnd   = invalidEscapeStart + 2;
-
-					if(str[i] == 'u')
-					{
-						invalidEscapeEnd += 4;
-
-						if(invalidEscapeEnd > str.data() + str.size())
-							invalidEscapeEnd = str.data() + str.size();
-					}
+					const auto remaining = static_cast<std::size_t>(str.data() + str.size() - invalidEscapeStart);
+					const auto escapeSize = str[i] == 'u' ? 6u : 2u;
+					const char* invalidEscapeEnd = invalidEscapeStart + (remaining < escapeSize ? remaining : escapeSize);
 
 					throw ParseError(
 						"Invalid escape sequence '" + std::string(invalidEscapeStart, invalidEscapeEnd) + '\'',
@@ -395,38 +413,69 @@ auto Parser::parseNumber() -> Value
 	const char* numberStart = m_pos;
 	bool isDecimal = false;
 
-	while(!atEnd() && (
-				isAlphanumeric(*m_pos) ||
-				*m_pos == '+' ||
-				*m_pos == '-' ||
-				*m_pos == '.' ||
-				*m_pos == 'e' ||
-				*m_pos == 'E'))
-	{
-		if(!isDecimal && (*m_pos == '.' || *m_pos == 'e' || *m_pos == 'E'))
-			isDecimal = true;
-
-		++m_pos;
-	}
-
-	if(isDecimal)
-	{
-		std::size_t   idx     = 0;
-		const Decimal decimal = std::stod(std::string{numberStart, m_pos}, &idx);
-
-		if(idx < static_cast<std::size_t>(std::distance(numberStart, m_pos)))
-			throw ParseError("Invalid number value '" + std::string{numberStart, m_pos} + "'", textOffset(numberStart));
-
-		return decimal;
-	}
-
-	std::int64_t intValue;
-	const auto [ptr, ec] = std::from_chars(numberStart, m_pos, intValue);
-
-	if(ec != std::errc{} || ptr != m_pos)
+	const auto isNumberCharacter = [](char c){
+		return isAlphanumeric(c) || c == '+' || c == '-' || c == '.';
+	};
+	const auto invalidNumber = [&]() -> Value{
+		while(!atEnd() && isNumberCharacter(*m_pos))
+			++m_pos;
 		throw ParseError("Invalid number value '" + std::string{numberStart, m_pos} + "'", textOffset(numberStart));
+	};
+	const auto consumeDigits = [&](){
+		const auto* begin = m_pos;
+		while(!atEnd() && isDigit(*m_pos))
+			++m_pos;
+		return begin != m_pos;
+	};
 
-	return intValue;
+	if(*m_pos == '-')
+		++m_pos;
+	if(atEnd() || !isDigit(*m_pos))
+		return invalidNumber();
+
+	if(*m_pos == '0')
+		++m_pos;
+	else
+		consumeDigits();
+
+	if(!atEnd() && *m_pos == '.')
+	{
+		isDecimal = true;
+		++m_pos;
+		if(!consumeDigits())
+			return invalidNumber();
+	}
+
+	if(!atEnd() && (*m_pos == 'e' || *m_pos == 'E'))
+	{
+		isDecimal = true;
+		++m_pos;
+		if(!atEnd() && (*m_pos == '+' || *m_pos == '-'))
+			++m_pos;
+		if(!consumeDigits())
+			return invalidNumber();
+	}
+
+	if(!atEnd() && isNumberCharacter(*m_pos))
+		return invalidNumber();
+
+	if(!isDecimal)
+	{
+		if(std::string_view(numberStart, m_pos) == "-0")
+			return -0.0;
+
+		Integer integer;
+		const auto [ptr, ec] = std::from_chars(numberStart, m_pos, integer);
+		if(ec == std::errc{} && ptr == m_pos)
+			return integer;
+	}
+
+	Decimal decimal;
+	const auto [ptr, ec] = std::from_chars(numberStart, m_pos, decimal);
+	if(ec != std::errc{} || ptr != m_pos)
+		return invalidNumber();
+
+	return decimal;
 }
 
 auto Parser::parseIdentifier() -> Value

@@ -1,3 +1,4 @@
+#include <cmath>
 #include <limits>
 #include <test/test.h>
 #include <lsp/json/json.h>
@@ -38,9 +39,11 @@ int main(int argc, char** argv)
 		{"Zero",                        {"0",              0}},
 		{"PositiveInteger",             {"42",             42}},
 		{"NegativeInteger",             {"-42",            -42}},
-		{"NegativeZero",                {"-0",             0}},
+		{"NegativeZero",                {"-0",             -0.0}},
 		{"Int32Max",                    {"2147483647",     std::numeric_limits<Integer>::max()}},
 		{"Int32Min",                    {"-2147483648",    std::numeric_limits<Integer>::min()}},
+		{"IntegerBelowInt32Min",          {"-2147483649",    -2147483649.0}},
+		{"IntegerAboveInt64Max",          {"18446744073709551615", 18446744073709551615.0}},
 		{"IntegerOverflowToDecimal",    {"2147483648",     2147483648.0}}, // Out of range 32 bit int falls back to Decimal
 		{"Decimal",                     {"3.14",           3.14}},
 		{"NegativeDecimal",             {"-2.5",           -2.5}},
@@ -73,6 +76,9 @@ int main(int argc, char** argv)
 		{"MixedEscapes",               {R"("a\tb\nc\\d\"eéf")", "a\tb\nc\\d\"eéf"}},
 		{"UnicodeEscapeZero",          {R"("\u0000")",          String(1, '\0')}},
 		{"UnicodeEscapeAscii",         {R"("\u0041")",          "A"}},
+		{"UnicodeEscapeSurrogatePair",   {R"("\uD834\uDD1E")", "𝄞"}},
+		{"UnicodeEscapeEmoji",           {R"("\uD83D\uDE00")", "😀"}},
+		{"UnicodeEscapePairBounds",      {R"("\uD800\uDC00\uDBFF\uDFFF")", "𐀀􏿿"}},
 		{"UnicodeEscapeThreeByte",     {R"("\u4e2d")",          "中"}},
 	});
 
@@ -153,6 +159,55 @@ int main(int argc, char** argv)
 		{"TruncatedUnicodeEscape",     {R"("\u12")",        "Invalid escape sequence '\\u12'",   1}},
 		{"InvalidHexUnicodeEscape",    {R"("\u12zz")",      "Invalid escape sequence '\\u12zz'", 1}},
 		{"AllInvalidHexUnicodeEscape", {R"("\uZZZZ")",      "Invalid escape sequence '\\uZZZZ'", 1}},
+	});
+
+	app.addTest("InvalidJsonGrammar", [](std::string text){
+		test::expectException<ParseError>([&](){ (void)parse(text); });
+	})({
+		{"LeadingZero", {"01"}},
+		{"NegativeLeadingZero", {"-01"}},
+		{"MissingIntegerPart", {"-.1"}},
+		{"MissingFractionDigits", {"1."}},
+		{"MissingExponentDigits", {"1.e2"}},
+		{"ExponentSignOnly", {"1e+"}},
+		{"DecimalOutOfRange", {"1e999"}},
+		{"DecimalUnderflow", {"1e-999"}},
+		{"VerticalTabOutsideString", {"\vtrue"}},
+		{"ControlByteAfterValue", {std::string("true\0", 5)}},
+		{"Utf8OutsideString", {"étrue"}},
+		{"RawTabInString", {"\"a\tb\""}},
+		{"RawCarriageReturnInString", {"\"a\rb\""}},
+		{"RawNullInString", {std::string("\"a\0b\"", 5)}},
+		{"ObjectKeyAtEnd", {R"({"key")"}},
+	});
+
+	app.addTest("ParserResetAfterFailure", [](){
+		auto parser = Parser(R"({"key")");
+		for(int i = 0; i < 2; ++i)
+		{
+			parser.reset();
+			test::expectException<ParseError>([&](){ (void)parser.parse(); }, "Expected ':'");
+		}
+	});
+
+	app.addTest("NestingDepthBoundary", [](){
+		const auto accepted = std::string(512, '[') + "0" + std::string(512, ']');
+		test::check(parse(accepted).isArray());
+		const auto rejected = std::string(513, '[') + "0" + std::string(513, ']');
+		test::expectException<ParseError>([&](){ (void)parse(rejected); }, "Maximum JSON nesting depth exceeded");
+		auto objects = std::string();
+		for(int i = 0; i < 513; ++i)
+			objects += "{\"x\":";
+		objects += "0";
+		objects += std::string(513, '}');
+		test::expectException<ParseError>([&](){ (void)parse(objects); }, "Maximum JSON nesting depth exceeded");
+	});
+
+	app.addTest("NegativeZeroPreservesSign", [](){
+		const auto value = parse("-0");
+		test::check(value.isDecimal() && std::signbit(value.number()));
+		test::compare(stringify(value), "-0.0");
+		test::check(std::signbit(parse(stringify(value)).number()));
 	});
 
 	return app.main(argc, argv);

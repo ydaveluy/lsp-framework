@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "json.h"
 #include "parser.h"
 #include "writer.h"
@@ -137,14 +138,16 @@ auto Object::operator==(const Object& other) const -> bool
 	if(size() != other.size())
 		return false;
 
+	if(std::equal(begin(), end(), other.begin(), [](const auto& lhs, const auto& rhs){
+		return lhs.key() == rhs.key() && lhs.value() == rhs.value();
+	}))
+		return true;
+
 	for(const auto& [key, value] : m_keyValuePairs)
 	{
-		const auto* otherVal = other.find(key);
-
-		if(!otherVal)
-			return false;
-
-		if(value != *otherVal)
+		const auto matches = [&](const auto& pair){ return pair.key() == key && pair.value() == value; };
+		const auto count = std::count_if(m_keyValuePairs.begin(), m_keyValuePairs.end(), matches);
+		if(count == 0 || count != std::count_if(other.begin(), other.end(), matches))
 			return false;
 	}
 
