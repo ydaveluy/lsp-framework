@@ -1,6 +1,8 @@
 #pragma once
 
+#include <concepts>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -135,11 +137,15 @@ inline auto readFileContent(const std::string& fileName, bool mayFail = false) -
 
 	file.seekg(0, std::ios::end);
 	const auto fileSize = file.tellg();
+	if(fileSize < 0)
+		throw std::runtime_error("Failed to read file '" + fileName + '\'');
 	file.seekg(0, std::ios::beg);
 
 	std::string text;
 	text.resize(static_cast<std::string::size_type>(fileSize));
 	file.read(&text[0], static_cast<std::streamsize>(fileSize));
+	if(!file)
+		throw std::runtime_error("Failed to read file '" + fileName + '\'');
 
 	return text;
 }
@@ -152,6 +158,9 @@ inline void writeFileContent(const std::string& fileName, std::string_view conte
 		throw std::runtime_error("Failed to write file '" + fileName + '\'');
 
 	file.write(content.data(), static_cast<std::streamsize>(content.size()));
+	file.close();
+	if(!file)
+		throw std::runtime_error("Failed to write file '" + fileName + '\'');
 }
 
 } // namespace lspgen

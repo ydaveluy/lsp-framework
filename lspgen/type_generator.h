@@ -27,6 +27,7 @@ private:
 	std::unordered_set<std::string_view>         m_processedTypes;
 	std::unordered_set<std::string_view>         m_typesBeingProcessed;
 	std::unordered_map<const Type*, std::string> m_generatedTypeNames;
+	std::unordered_set<std::string>              m_usedTypeNames;
 	CppWriter                                    m_headerWriter;
 	CppWriter                                    m_declWriter;
 	CppWriter                                    m_sourceWriter;

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.14)
 
 project(lsp)
 
@@ -155,6 +155,13 @@ add_library(lsp
 	${LSP_GENERATED_HEADERS}
 	${LSP_GENERATED_SOURCES}
 )
+find_package(Threads REQUIRED)
+target_link_libraries(lsp PUBLIC Threads::Threads)
+target_compile_features(lsp PUBLIC cxx_std_20)
+if(LSP_USE_SANITIZERS AND
+   (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+	target_link_options(lsp INTERFACE $<$<CONFIG:DEBUG>:-fsanitize=address,undefined>)
+endif()
 include(GNUInstallDirs)
 target_include_directories(lsp PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -162,12 +169,7 @@ target_include_directories(lsp PUBLIC
 	$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
-	set_target_properties(
-		lsp PROPERTIES
-		DEBUG_POSTFIX d
-	)
-endif()
+set_target_properties(lsp PROPERTIES DEBUG_POSTFIX d)
 
 if (LSP_INSTALL)
 	include(cmake/utils.cmake)

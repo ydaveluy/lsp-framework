@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include "meta_model.h"
@@ -15,6 +17,50 @@ auto extractDocumentation(const json::Object& json) -> std::string
 		return doc->string();
 
 	return {};
+}
+
+auto sameType(const Type& left, const Type& right) -> bool
+{
+	if(left.category() != right.category())
+		return false;
+	switch(left.category())
+	{
+	case Type::Base:
+		return left.as<BaseType>().kind == right.as<BaseType>().kind;
+	case Type::Reference:
+		return left.as<ReferenceType>().name == right.as<ReferenceType>().name;
+	case Type::Array:
+		return sameType(*left.as<ArrayType>().elementType, *right.as<ArrayType>().elementType);
+	case Type::Map:
+		return sameType(*left.as<MapType>().keyType, *right.as<MapType>().keyType) &&
+		       sameType(*left.as<MapType>().valueType, *right.as<MapType>().valueType);
+	case Type::And:
+	case Type::Or:
+	case Type::Tuple:
+	{
+		const auto list = [](const Type& type) -> const std::vector<TypePtr>&
+		{
+			if(type.isA<AndType>()) return type.as<AndType>().typeList;
+			if(type.isA<OrType>()) return type.as<OrType>().typeList;
+			return type.as<TupleType>().typeList;
+		};
+		return std::ranges::equal(list(left), list(right),
+			[](const auto& a, const auto& b){ return sameType(*a, *b); });
+	}
+	case Type::StructureLiteral:
+		return std::ranges::equal(left.as<StructureLiteralType>().properties, right.as<StructureLiteralType>().properties,
+			[](const auto& a, const auto& b)
+			{
+				return a.name == b.name && a.isOptional == b.isOptional && sameType(*a.type, *b.type);
+			});
+	case Type::StringLiteral:
+		return left.as<StringLiteralType>().stringValue == right.as<StringLiteralType>().stringValue;
+	case Type::IntegerLiteral:
+		return left.as<IntegerLiteralType>().integerValue == right.as<IntegerLiteralType>().integerValue;
+	case Type::BooleanLiteral:
+		return left.as<BooleanLiteralType>().booleanValue == right.as<BooleanLiteralType>().booleanValue;
+	}
+	return false;
 }
 
 } // namespace
@@ -187,7 +233,8 @@ void OrType::extract(const json::Object& json)
 
 			for(std::size_t p = 0; p < first.properties.size(); ++p)
 			{
-				if(first.properties[p].name != second.properties[p].name)
+				if(first.properties[p].name != second.properties[p].name ||
+				   !sameType(*first.properties[p].type, *second.properties[p].type))
 				{
 					propertiesEqual = false;
 					break;
@@ -291,7 +338,12 @@ void StringLiteralType::extract(const json::Object& json)
 
 void IntegerLiteralType::extract(const json::Object& json)
 {
-	integerValue = static_cast<json::Integer>(json.get("value").number());
+	const auto number = json.get("value").number();
+	if(!std::isfinite(number) || std::trunc(number) != number ||
+	   number < std::numeric_limits<json::Integer>::min() ||
+	   number > std::numeric_limits<json::Integer>::max())
+		throw json::TypeError("Integer literal is outside the LSP integer range");
+	integerValue = static_cast<json::Integer>(number);
 }
 
 /*
@@ -395,7 +447,9 @@ auto Structure::findProperty(std::string_view propertyName, const MetaModel& met
 			return &prop;
 	}
 
-	return findStructureProperty(mixins, propertyName, metaModel);
+	if(const auto* property = findStructureProperty(mixins, propertyName, metaModel))
+		return property;
+	return findStructureProperty(extends, propertyName, metaModel);
 }
 
 /*

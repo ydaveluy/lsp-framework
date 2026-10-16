@@ -16,7 +16,7 @@ The `messages.h` and `types.h` headers also serve as a protocol reference and ha
 
 ## Building
 
-There aren't any external dependencies except for `cmake` and a compiler that supports C++20.
+There aren't any external dependencies except for CMake 3.14 or newer and a compiler that supports C++20.
 
 The project is built as a static library. LSP type definitions, messages and serialization boilerplate are generated from the official [meta model](https://github.com/microsoft/language-server-protocol/tree/gh-pages/_specifications/lsp) during the build and are written to `<build_dir>/generated/lsp/`.
 

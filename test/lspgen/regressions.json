@@ -1,0 +1,227 @@
+{
+  "metaData": {
+    "version": "3.18.0"
+  },
+  "requests": [
+    {
+      "method": "custom/audit",
+      "messageDirection": "both",
+      "params": {
+        "kind": "literal",
+        "value": {
+          "properties": [
+            {
+              "name": "query",
+              "type": {
+                "kind": "base",
+                "name": "string"
+              }
+            }
+          ]
+        }
+      },
+      "result": {
+        "kind": "base",
+        "name": "integer"
+      }
+    }
+  ],
+  "notifications": [],
+  "enumerations": [],
+  "structures": [
+    {
+      "name": "AuditDefaults",
+      "properties": [
+        {
+          "name": "count",
+          "type": {
+            "kind": "base",
+            "name": "integer"
+          }
+        },
+        {
+          "name": "enabled",
+          "type": {
+            "kind": "base",
+            "name": "boolean"
+          }
+        },
+        {
+          "name": "ratio",
+          "type": {
+            "kind": "base",
+            "name": "decimal"
+          }
+        }
+      ]
+    },
+    {
+      "name": "AuditOptions",
+      "properties": [
+        {
+          "name": "count",
+          "type": {
+            "kind": "base",
+            "name": "integer"
+          },
+          "optional": true
+        },
+        {
+          "name": "label",
+          "type": {
+            "kind": "base",
+            "name": "string"
+          },
+          "optional": true
+        },
+        {
+          "name": "nested",
+          "type": {
+            "kind": "reference",
+            "name": "AuditOptions"
+          },
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "AuditBase",
+      "properties": [
+        {
+          "name": "kind",
+          "type": {
+            "kind": "base",
+            "name": "string"
+          }
+        }
+      ]
+    },
+    {
+      "name": "AuditMiddle",
+      "properties": [],
+      "extends": [
+        {
+          "kind": "reference",
+          "name": "AuditBase"
+        }
+      ]
+    },
+    {
+      "name": "AuditLeaf",
+      "properties": [
+        {
+          "name": "kind",
+          "type": {
+            "kind": "stringLiteral",
+            "value": "leaf"
+          }
+        }
+      ],
+      "extends": [
+        {
+          "kind": "reference",
+          "name": "AuditMiddle"
+        }
+      ]
+    },
+    {
+      "name": "AuditOptionalLiterals",
+      "properties": [
+        {
+          "name": "kind",
+          "optional": true,
+          "type": {
+            "kind": "stringLiteral",
+            "value": "audit"
+          }
+        },
+        {
+          "name": "flag",
+          "optional": true,
+          "type": {
+            "kind": "booleanLiteral",
+            "value": true
+          }
+        },
+        {
+          "name": "number",
+          "optional": true,
+          "type": {
+            "kind": "integerLiteral",
+            "value": 7
+          }
+        }
+      ]
+    },
+    {
+      "name": "AuditOptionalBase",
+      "properties": [
+        {
+          "name": "kind",
+          "type": {
+            "kind": "base",
+            "name": "string"
+          },
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "AuditOptionalLeaf",
+      "extends": [
+        {
+          "kind": "reference",
+          "name": "AuditOptionalBase"
+        }
+      ],
+      "properties": [
+        {
+          "name": "kind",
+          "type": {
+            "kind": "stringLiteral",
+            "value": "leaf"
+          },
+          "optional": true
+        }
+      ]
+    }
+  ],
+  "typeAliases": [
+    {
+      "name": "AuditChoice",
+      "type": {
+        "kind": "or",
+        "items": [
+          {
+            "kind": "literal",
+            "value": {
+              "properties": [
+                {
+                  "name": "payload",
+                  "type": {
+                    "kind": "base",
+                    "name": "integer"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "kind": "literal",
+            "value": {
+              "properties": [
+                {
+                  "name": "payload",
+                  "type": {
+                    "kind": "base",
+                    "name": "string"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

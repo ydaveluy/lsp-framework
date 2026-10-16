@@ -147,6 +147,10 @@ void TypeGenerator::generate(const MetaModel& metaModel, const std::string& file
 	m_metaModel           = &metaModel;
 	m_processedTypes      = {"LSPArray", "LSPObject", "LSPAny"};
 	m_typesBeingProcessed = {};
+	m_generatedTypeNames.clear();
+	m_usedTypeNames.clear();
+	for(const auto& name : metaModel.typeNames())
+		m_usedTypeNames.insert(CppWriter::upperCaseIdentifier(name));
 	m_headerWriter.reset(*createFile(fileBaseName + ".h"));
 	m_declWriter.reset();
 	m_sourceWriter.reset(*createFile(fileBaseName + ".cpp"));
@@ -283,7 +287,7 @@ void TypeGenerator::generate(const Structure& structure)
 	auto       inheritedLiterals     = std::vector<const StructureProperty*>();
 	const auto checkInheritedLiteral = [&](const StructureProperty& p)
 		{
-			if(p.type->isLiteral() && !!structure.findBaseProperty(p.name, *m_metaModel))
+			if(p.type->isLiteral() && !p.isOptional && !!structure.findBaseProperty(p.name, *m_metaModel))
 				inheritedLiterals.push_back(&p);
 		};
 
@@ -431,12 +435,18 @@ void TypeGenerator::generateType(const TypePtr& type, const std::string& baseNam
 		break;
 	case Type::StructureLiteral:
 		{
+			if(m_generatedTypeNames.contains(type.get()))
+				break;
 			// HACK:
 			// Temporarily transfer ownership of property types to temporary structure so the same generator code can be used for structure literals.
 			auto& structureLiteral = type->as<StructureLiteralType>();
 			Structure structure;
 
 			structure.name = baseName;
+			// An alias already reserves its own name.
+			if(!alias)
+				for(std::size_t suffix = 2; !m_usedTypeNames.insert(structure.name).second; ++suffix)
+					structure.name = baseName + '_' + std::to_string(suffix);
 			m_generatedTypeNames[type.get()] = structure.name;
 			structure.properties = std::move(structureLiteral.properties);
 
@@ -566,10 +576,10 @@ void TypeGenerator::generateStructureProperty(const Structure& structure, const 
 
 		auto initializer = std::string();
 
-		if(isLiteral)
+		if(isLiteral && p.type->category() != Type::StructureLiteral && !p.isOptional)
 			initializer = literalPropertyValue(p);
-		else if(p.isOptional)
-			initializer = "{}"; // Explicitly initialize optionals to avoid warnings with designated initializers that omit them
+		else
+			initializer = "{}";
 
 		m_headerWriter.writeVariable(p.name, cppTypeName(*p.type, p.isOptional), initializer);
 
@@ -582,6 +592,10 @@ void TypeGenerator::generateStructureProperty(const Structure& structure, const 
 			m_sourceWriter.indent();
 			m_sourceWriter.writeLine("fromJson(std::move(*v), value." + p.name + ");");
 			m_sourceWriter.outdent();
+			m_sourceWriter.writeLine("else");
+			m_sourceWriter.indent();
+			m_sourceWriter.writeLine("value." + p.name + " = {};");
+			m_sourceWriter.outdent();
 		}
 		else
 		{
@@ -592,14 +606,15 @@ void TypeGenerator::generateStructureProperty(const Structure& structure, const 
 
 		if(p.isOptional)
 			m_serializationWriter.outdent();
-
-		if(isLiteral && p.type->category() != Type::StructureLiteral)
-		{
-			m_sourceWriter.writeLine("if(value." + p.name + " != " + initializer + ")");
-			m_sourceWriter.indent();
-			m_sourceWriter.writeLine("throw json::TypeError(\"Invalid value for literal property '" + p.name + "'\");");
-			m_sourceWriter.outdent();
-		}
+	}
+	if(isLiteral && p.type->category() != Type::StructureLiteral)
+	{
+		const auto expected = literalPropertyValue(p);
+		const auto actual = std::string(p.isOptional ? "*value." : "value.") + p.name;
+		m_sourceWriter.writeLine("if(" + std::string(p.isOptional ? "value." + p.name + " && " : "") + actual + " != " + expected + ")");
+		m_sourceWriter.indent();
+		m_sourceWriter.writeLine("throw json::TypeError(\"Invalid value for literal property '" + p.name + "'\");");
+		m_sourceWriter.outdent();
 	}
 }
 
