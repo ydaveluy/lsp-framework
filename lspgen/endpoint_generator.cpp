@@ -122,7 +122,7 @@ void EndpointGenerator::generateOutgingMethod(const std::string& className, cons
 	auto       funcParams     = CppWriter::FuncParamList();
 
 	if(hasParams)
-		funcParams.push_back({CppWriter::type(message.paramsTypeName, CppWriter::TypeConst | CppWriter::TypeRef), "params"});
+		funcParams.push_back({CppWriter::type(CppWriter::upperCaseIdentifier(message.paramsTypeName), CppWriter::TypeConst | CppWriter::TypeRef), "params"});
 
 	if(!isNotification)
 		m_declWriter.write("[[nodiscard]] ");
@@ -186,21 +186,42 @@ void EndpointGenerator::generateIncomingMethod(const std::string& className, con
 	if(hasParams)
 		m_declWriter.write(paramsType + "&& params");
 
+	const auto isServerInitialize = className == "ServerEndpoint" && method == "initialize";
 	m_declWriter.write(") mutable");
+
+	if(isServerInitialize)
+		m_declWriter.write(" -> RequestResult<InitializeResult>");
+
 	m_declWriter.writeBlockStart(true);
 
-	if(hasParams)
-		m_declWriter.writeLine("const auto hook = messageHook<" + messageType + ">(*this, params);");
+	if(isServerInitialize)
+	{
+		m_declWriter.writeLine("preMethodCall<requests::Initialize>(params);");
+		m_declWriter.writeLine("try");
+		m_declWriter.writeBlockStart(true);
+		m_declWriter.writeLine("return completeInitialize(RequestResult<InitializeResult>(callback(std::move(params))));");
+		m_declWriter.writeBlockEnd(false, false);
+		m_declWriter.writeLine("catch(...)");
+		m_declWriter.writeBlockStart(true);
+		m_declWriter.writeLine("initializeFailed();");
+		m_declWriter.writeLine("throw;");
+		m_declWriter.writeBlockEnd(false, false);
+	}
 	else
-		m_declWriter.writeLine("const auto hook = messageHook<" + messageType + ">(*this);");
+	{
+		if(hasParams)
+			m_declWriter.writeLine("const auto hook = messageHook<" + messageType + ">(*this, params);");
+		else
+			m_declWriter.writeLine("const auto hook = messageHook<" + messageType + ">(*this);");
 
-	if(hasResult)
-		m_declWriter.write("return ");
+		if(hasResult)
+			m_declWriter.write("return ");
 
-	if(hasParams)
-		m_declWriter.writeLine("callback(std::move(params));");
-	else
-		m_declWriter.writeLine("callback();");
+		if(hasParams)
+			m_declWriter.writeLine("callback(std::move(params));");
+		else
+			m_declWriter.writeLine("callback();");
+	}
 
 	m_declWriter.writeBlockEnd(false, false);
 	m_declWriter.outdent();

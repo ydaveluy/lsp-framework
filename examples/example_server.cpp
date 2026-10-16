@@ -71,9 +71,9 @@ public:
 	}
 
 private:
-	lsp::ServerEndpoint                               m_endpoint;
 	std::mutex                                        m_documentsMutex;
 	std::unordered_map<lsp::DocumentUri, std::string> m_documents;
+	lsp::ServerEndpoint                               m_endpoint;
 
 	// Send a window/logMessage to the client and mirror it to the console
 	void log(lsp::MessageType type, const std::string& message)
@@ -281,9 +281,7 @@ auto parsePortArg(int argc, char** argv) -> std::optional<unsigned short>
 		const auto portStr = arg.substr(PortArg.size());
 		unsigned short port = 0;
 		const auto [ptr, ec] = std::from_chars(portStr.data(), portStr.data() + portStr.size(), port);
-		(void)ptr;
-
-		if(ec == std::errc{})
+		if(ec == std::errc{} && ptr == portStr.data() + portStr.size())
 			return port;
 
 		logStdErr("invalid port '" + std::string(portStr) + '\'');

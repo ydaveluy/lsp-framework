@@ -67,6 +67,7 @@ int main(int argc, char** argv)
 		test::check(!request.isNotification(), "hasId");
 		test::compare(*request.id, expectedId);
 	})({
+		{"IntegralDecimal", {R"({"jsonrpc":"2.0","id":1.0,"method":"foo"})", MessageId(json::Integer(1))}},
 		{"Integer", {R"({"jsonrpc":"2.0","id":1,"method":"foo"})",     MessageId(json::Integer(1))}},
 		{"String",  {R"({"jsonrpc":"2.0","id":"abc","method":"foo"})", MessageId(json::String("abc"))}},
 		{"Null",    {R"({"jsonrpc":"2.0","id":null,"method":"foo"})",  MessageId(json::Null())}},
@@ -91,7 +92,7 @@ int main(int argc, char** argv)
 	};
 
 	app.addTest("FromJson/Request/MethodWrongTypeThrows", [](){
-		test::expectException<json::TypeError>([](){
+		test::expectException<ProtocolError>([](){
 			(void)messageFromJson(parseObject(R"({"jsonrpc":"2.0","method":123})"));
 		});
 	});
@@ -110,7 +111,7 @@ int main(int argc, char** argv)
 		test::check(!response.error.has_value(), "!hasError");
 	})({
 		{"Basic",              {R"({"jsonrpc":"2.0","id":1,"result":42})", MessageId(json::Integer(1)), 42}},
-		{"MissingIdDefaultsToNull", {R"({"jsonrpc":"2.0","result":1})",    MessageId(json::Null()),     1}},
+		{"ExplicitNullId", {R"({"jsonrpc":"2.0","id":null,"result":1})", MessageId(json::Null()), 1}},
 	});
 
 	app.addTest("FromJson/Response/Error", [](std::string_view json, int expectedCode, std::string_view expectedMessage, std::optional<json::Value> expectedData){
@@ -134,6 +135,13 @@ int main(int argc, char** argv)
 		{"MissingJsonrpc",        {R"({"id":1,"method":"foo"})", "jsonrpc property is missing"}},
 		{"WrongJsonrpcType",      {R"({"jsonrpc":2,"id":1,"method":"foo"})", "jsonrpc property expected to be a string"}},
 		{"WrongJsonrpcVersion",   {R"({"jsonrpc":"1.0","id":1,"method":"foo"})", "Invalid or unsupported jsonrpc version"}},
+		{"MissingResponseId", {R"({"jsonrpc":"2.0","result":1})", "Response id is missing"}},
+		{"FractionalId", {R"({"jsonrpc":"2.0","id":1.5,"method":"foo"})", "Request id number must be an integer in range"}},
+		{"LargeId", {R"({"jsonrpc":"2.0","id":2147483648,"method":"foo"})", "Request id number must be an integer in range"}},
+		{"SmallId", {R"({"jsonrpc":"2.0","id":-2147483649,"method":"foo"})", "Request id number must be an integer in range"}},
+		{"ErrorNotObject", {R"({"jsonrpc":"2.0","id":1,"error":null})", "Response error must be an object"}},
+		{"FractionalErrorCode", {R"({"jsonrpc":"2.0","id":1,"error":{"code":1.5,"message":"bad"}})", "Response error code must be an integer in range"}},
+		{"LargeErrorCode", {R"({"jsonrpc":"2.0","id":1,"error":{"code":2147483648,"message":"bad"}})", "Response error code must be an integer in range"}},
 		{"InvalidIdType",         {R"({"jsonrpc":"2.0","id":true,"method":"foo"})", "Request id type must be string, number or null"}},
 		{"InvalidParamsType",     {R"({"jsonrpc":"2.0","id":1,"method":"foo","params":"bad"})", "Params type must be object or array"}},
 		{"MissingResultAndError", {R"({"jsonrpc":"2.0","id":1})", "Response must have either 'result' or 'error'"}},
@@ -174,7 +182,7 @@ int main(int argc, char** argv)
 	});
 
 	app.addTest("FromJson/Batch/NonObjectElementThrows", [](){
-		test::expectException<json::TypeError>([](){
+		test::expectException<ProtocolError>([](){
 			(void)messageBatchFromJson(parseArray("[1]"));
 		});
 	});

@@ -1,11 +1,15 @@
+#include <barrier>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <test/test.h>
 #include "loopback_stream.h"
 #include <lsp/connection.h>
 #include <lsp/endpoint_base.h>
+#include <lsp/server_endpoint.h>
 #include <lsp/error.h>
 #include <lsp/json/json.h>
 #include <lsp/message_base.h>
@@ -302,6 +306,35 @@ int main(int argc, char** argv)
 			MessageError::InvalidRequest, "Server already initialized");
 	});
 
+	app.addTest("Server/InitializeTraceLevels", [](std::string trace, int expectedLogs, bool expectedPayload){
+		auto stream = LoopbackStream();
+		auto server = ServerEndpointBase(stream);
+		server.messageHandler().setMessageLogLevel(MessageHandler::MessageLogLevel::InfoAndPayload);
+
+		auto logs = 0;
+		auto hasPayload = false;
+		server.messageHandler().addMessageLogCallback([&](const MessageHandler::MessageLog& log){
+			if(log.method == "test/trace")
+			{
+				++logs;
+				hasPayload = log.payload.has_value();
+			}
+		});
+
+		auto params = InitializeParams();
+		params.trace.emplace(std::move(trace));
+		server.preMethodCall<requests::Initialize>(params);
+		server.customNotification("test/trace", json::Object({{"value", 1}}));
+
+		test::compare(logs, expectedLogs);
+		test::compare(hasPayload, expectedPayload);
+	})({
+		{"Off", {"off", 0, false}},
+		{"Messages", {"messages", 1, false}},
+		{"Verbose", {"verbose", 1, true}},
+		{"CustomKeepsPreviousLevel", {"custom", 1, true}},
+	});
+
 	app.addTest("Server/ShutdownRequiresInitialize", [](){
 		auto stream = LoopbackStream();
 		auto server = ServerEndpointBase(stream);
@@ -454,6 +487,193 @@ int main(int argc, char** argv)
 		server.processNextMessage(); // Response for test/longOp
 
 		test::check(canceledDuringWork, "canceledDuringWork");
+	});
+
+	app.addTest("EndpointBase/MessageHookSkipsPostWhenCallbackThrows", [](){
+		auto stream = LoopbackStream();
+		auto endpoint = HookedEndpoint(stream);
+		test::expectException<std::runtime_error>([&]{
+			endpoint.withHook<DummyMessage>([]{ throw std::runtime_error("failed"); });
+		});
+		test::compare(endpoint.preCount, 1);
+		test::compare(endpoint.postCount, 0);
+	});
+
+	app.addTest("Server/InitializeWaitsForSuccessfulDeferredResult", [](bool succeeds){
+		auto stream = LoopbackStream();
+		auto server = ServerEndpoint(stream);
+		auto promise = std::promise<InitializeResult>();
+		server.onInitialize([&](InitializeParams&&){ return promise.get_future(); });
+		auto params = json::Object({{"processId", json::Null()}, {"rootUri", json::Null()}, {"capabilities", json::Object()}});
+		server.customRequest("initialize", params, [](json::Value&&){}, [](const ResponseError&){});
+		server.processNextMessage();
+		test::check(!server.isInitialized(), "notInitializedWhilePending");
+
+		if(succeeds)
+			promise.set_value(InitializeResult());
+		else
+			promise.set_exception(std::make_exception_ptr(RequestError(1234, "failed")));
+
+		server.processNextMessage();
+		test::compare(server.isInitialized(), succeeds);
+	})({
+		{"Success", {true}},
+		{"Failure", {false}},
+	});
+
+	app.addTest("Server/PendingInitializeRejectsAnotherInitialize", [](){
+		auto stream = LoopbackStream();
+		auto server = ServerEndpoint(stream);
+		auto promise = std::promise<InitializeResult>();
+		auto calls = 0;
+		auto error = 0;
+		server.onInitialize([&](InitializeParams&&){ ++calls; return promise.get_future(); });
+		const auto params = json::Object({{"processId", json::Null()}, {"rootUri", json::Null()}, {"capabilities", json::Object()}});
+		server.customRequest("initialize", params, [](json::Value&&){});
+		server.processNextMessage();
+		server.customRequest("initialize", params, [](json::Value&&){}, [&](const ResponseError& e){ error = e.code(); });
+		server.processNextMessage();
+		server.processNextMessage();
+		test::compare(error, MessageError::InvalidRequest);
+		test::compare(calls, 1);
+		promise.set_value(InitializeResult());
+		server.processNextMessage();
+		test::check(server.isInitialized(), "firstInitializationSucceeded");
+	});
+
+	app.addTest("EndpointBase/LogHookCanReplaceItself", [](){
+		auto stream = LoopbackStream();
+		auto endpoint = EndpointBase(stream);
+		auto capture = std::make_shared<int>(42);
+		auto observer = std::weak_ptr<int>(capture);
+		auto aliveWhileRunning = false;
+		endpoint.setLogHook([&, capture = std::move(capture)](std::string_view, std::string_view){
+			endpoint.setLogHook({});
+			aliveWhileRunning = !observer.expired();
+		});
+		endpoint.messageHandler().setMessageLogLevel(MessageHandler::MessageLogLevel::Info);
+		endpoint.customNotification("test/log");
+		test::check(aliveWhileRunning, "runningHookRetainsItsCapture");
+		test::check(observer.expired(), "oldHookReleasedAfterCall");
+	});
+
+	app.addTest("Server/InitializeResultKinds", [](int kind, bool succeeds){
+		auto stream = LoopbackStream();
+		auto server = ServerEndpoint(stream);
+		const auto compute = [succeeds]() -> InitializeResult {
+			if(!succeeds)
+				throw RequestError(1234, "failed");
+			return InitializeResult();
+		};
+
+		switch(kind)
+		{
+		case 0:
+			server.onInitialize([compute](InitializeParams&&){ return compute(); });
+			break;
+		case 1:
+			server.onInitialize([compute](InitializeParams&&){ return compute; });
+			break;
+		case 2:
+			server.onInitialize([compute](InitializeParams&&){ return std::async(std::launch::deferred, compute); });
+			break;
+		default:
+			server.onInitialize([compute](InitializeParams&&) -> RequestResult<InitializeResult> {
+				return TaskFunction<InitializeResult>(compute);
+			});
+			break;
+		}
+
+		auto successful = false;
+		auto error = 0;
+		const auto params = json::Object({{"processId", json::Null()}, {"rootUri", json::Null()}, {"capabilities", json::Object()}});
+		server.customRequest("initialize", params, [&](json::Value&&){ successful = true; }, [&](const ResponseError& e){ error = e.code(); });
+		server.processNextMessage();
+		server.processNextMessage();
+		test::compare(successful, succeeds);
+		test::compare(error, succeeds ? 0 : 1234);
+		test::compare(server.isInitialized(), succeeds);
+
+		if(!succeeds)
+		{
+			server.onInitialize([](InitializeParams&&){ return InitializeResult(); });
+			server.customRequest("initialize", params, [&](json::Value&&){ successful = true; });
+			server.processNextMessage();
+			server.processNextMessage();
+			test::check(successful, "retrySucceeded");
+			test::check(server.isInitialized(), "initializedAfterRetry");
+		}
+	})({
+		{"DirectSuccess", {0, true}},
+		{"DirectFailure", {0, false}},
+		{"CallableSuccess", {1, true}},
+		{"CallableFailure", {1, false}},
+		{"FutureSuccess", {2, true}},
+		{"FutureFailure", {2, false}},
+		{"ExplicitSuccess", {3, true}},
+		{"ExplicitFailure", {3, false}},
+	});
+
+	app.addTest("Server/ReadinessPublicationCannotAdmitAnotherInitialize", [](){
+		class ReusableServer : public ServerEndpointBase{
+		public:
+			using ServerEndpointBase::ServerEndpointBase;
+			void prepareInitialize()
+			{
+				postMethodCall<requests::Initialize>();
+				setState(EndpointBase::State::Uninitialized);
+				preMethodCall<requests::Initialize>(InitializeParams());
+			}
+		};
+		auto stream = LoopbackStream();
+		auto server = ReusableServer(stream);
+		auto phase = std::barrier(2);
+		auto accepted = 0;
+		auto wrongError = 0;
+		constexpr auto iterations = 10000;
+		auto publisher = std::jthread([&]{
+			for(auto i = 0; i < iterations; ++i)
+			{
+				server.prepareInitialize();
+				phase.arrive_and_wait();
+				server.postMethodCall<requests::Initialize>();
+				phase.arrive_and_wait();
+			}
+		});
+
+		for(auto i = 0; i < iterations; ++i)
+		{
+			phase.arrive_and_wait();
+			try
+			{
+				server.preMethodCall<requests::Initialize>(InitializeParams());
+				++accepted;
+			}
+			catch(const RequestError& error)
+			{
+				if(error.code() != MessageError::InvalidRequest)
+					++wrongError;
+			}
+			phase.arrive_and_wait();
+		}
+
+		publisher.join();
+		test::compare(accepted, 0);
+		test::compare(wrongError, 0);
+	});
+
+	app.addTest("EndpointBase/ReleasedLogCaptureCanReplaceTheHook", [](){
+		auto stream = LoopbackStream();
+		auto endpoint = EndpointBase(stream);
+		auto released = false;
+		auto capture = std::shared_ptr<int>(new int(42), [&](int* value){
+			delete value;
+			endpoint.setLogHook({});
+			released = true;
+		});
+		endpoint.setLogHook([capture = std::move(capture)](std::string_view, std::string_view){});
+		endpoint.setLogHook({});
+		test::check(released, "captureReleasedWithoutHookLock");
 	});
 
 	return app.main(argc, argv);

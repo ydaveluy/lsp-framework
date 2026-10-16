@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <concepts>
+#include <exception>
+#include <memory>
+#include <mutex>
 #include <lsp/io/stream.h>
 #include <lsp/message_handler.h>
 
@@ -16,6 +19,7 @@ struct Exit;
 } // namespace notifications
 
 struct InitializeParams;
+struct InitializeResult;
 
 using RequestContext = MessageHandler::RequestContext;
 
@@ -101,11 +105,13 @@ protected:
 
 		~MessageHook()
 		{
-			m_endpoint->template postMethodCall<MessageType>();
+			if(std::uncaught_exceptions() == m_uncaughtExceptions)
+				m_endpoint->template postMethodCall<MessageType>();
 		}
 
 	private:
 		EndpointType* m_endpoint = nullptr;
+		int m_uncaughtExceptions = std::uncaught_exceptions();
 	};
 
 	template<typename MessageType, typename EndpointType, typename... Args>
@@ -115,9 +121,12 @@ protected:
 	}
 
 private:
-	std::atomic<State> m_state = State::Inactive;
-	LogHook            m_logHook; // Outlives the message handler whose responses log through it
-	MessageHandler     m_messageHandler;
+	friend class ServerEndpointBase;
+	std::atomic<State>       m_state = State::Inactive;
+	std::atomic<bool>        m_initializing = false;
+	std::mutex               m_logHookMutex;
+	std::shared_ptr<LogHook> m_logHook; // Outlives the message handler whose responses log through it
+	MessageHandler           m_messageHandler;
 };
 
 /*
@@ -167,6 +176,9 @@ public:
 	void postMethodCall(){}
 
 private:
+	friend class ServerEndpoint;
+	auto completeInitialize(RequestResult<InitializeResult> result) -> RequestResult<InitializeResult>;
+	void initializeFailed();
 	void verifyInitialized() const;
 	void registerBaseHandlers();
 };

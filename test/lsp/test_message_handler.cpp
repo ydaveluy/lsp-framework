@@ -3,6 +3,8 @@
 #include <condition_variable>
 #include <cstring>
 #include <future>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -46,6 +48,12 @@ struct TestNotification{
 struct TestNoParamsNotification{
 	static constexpr auto Method = std::string_view("test/noParamsNotification");
 	static constexpr auto Kind   = MessageKind::Notification;
+};
+
+struct InvalidResultRequest{
+	static constexpr auto Method = std::string_view("test/invalidResult");
+	static constexpr auto Kind = MessageKind::Request;
+	using Result = std::vector<unsigned int>;
 };
 
 std::string makeMessage(std::string_view body)
@@ -1676,6 +1684,257 @@ int main(int argc, char** argv)
 		test::compare(response.array()[0].object().get("result").array().size(), 3);
 		test::compare(response.array()[1].object().get("id").integer(), 2);
 		test::compare(response.array()[1].object().get("result").integer(), 10);
+	});
+
+	app.addTest("Registration/HandlerCanRemoveAndReplaceItself", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		handler.on<TestNoParamsRequest>([&]{
+			handler.remove(std::string(TestNoParamsRequest::Method));
+			handler.on<TestNoParamsRequest>([]{ return std::vector<int>{2}; });
+			return std::vector<int>{1};
+		});
+
+		auto first = handler.sendRequest<TestNoParamsRequest>();
+		handler.processNextMessage();
+		handler.processNextMessage();
+		auto second = handler.sendRequest<TestNoParamsRequest>();
+		handler.processNextMessage();
+		handler.processNextMessage();
+		test::compare(getResult(first), std::vector<int>{1});
+		test::compare(getResult(second), std::vector<int>{2});
+	});
+
+	app.addTest("Registration/RequestAndNotificationHandlersAreIndependent", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto notifications = 0;
+		handler.onCustom<GenericRequestNoParams>("same", []{ return json::Value(42); });
+		handler.onCustom<GenericNotificationNoParams>("same", [&]{ ++notifications; });
+		handler.sendCustomNotification<GenericNotificationNoParams>("same");
+		handler.processNextMessage();
+		auto response = handler.sendCustomRequest<GenericRequestNoParams>("same");
+		handler.processNextMessage();
+		handler.processNextMessage();
+		test::compare(notifications, 1);
+		test::compare(getResult(response).integer(), 42);
+	});
+
+	app.addTest("Registration/RequestCannotInvokeANotificationHandler", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto called = false;
+		handler.on<TestNoParamsNotification>([&]{ called = true; });
+		auto response = handler.sendCustomRequest<GenericRequestNoParams>(TestNoParamsNotification::Method);
+		handler.processNextMessage();
+		handler.processNextMessage();
+		test::check(!called, "notificationNotInvoked");
+		expectResponseError(response, MessageError::MethodNotFound, "Method not found");
+	});
+
+	app.addTest("Request/LvalueCallbacks", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		handler.on<TestNoParamsRequest>([]{ return std::vector<int>{42}; });
+		auto value = 0;
+		auto then = [&](std::vector<int> result){ value = result.front(); };
+		auto error = [](const ResponseError&){ test::fail("unexpected error"); };
+		handler.sendRequest<TestNoParamsRequest>(then, error);
+		handler.processNextMessage();
+		handler.processNextMessage();
+		test::compare(value, 42);
+	});
+
+	app.addTest("Request/FailedWriteReleasesPendingCallback", [](){
+		struct FailingStream : LoopbackStream{
+			void write(const char*, std::size_t) override { throw io::Error("failed write"); }
+		};
+		auto stream = FailingStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto capture = std::make_shared<int>(42);
+		auto observer = std::weak_ptr<int>(capture);
+		test::expectException<ConnectionError>([&]{
+			handler.sendRequest<TestNoParamsRequest>([capture = std::move(capture)](std::vector<int>){});
+		});
+		test::check(observer.expired(), "pendingCallbackReleased");
+	});
+
+	app.addTest("Cancelation/StopCallbackCanInspectRequestState", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto started = std::promise<void>();
+		auto release = std::promise<void>();
+		auto released = release.get_future();
+		auto observed = false;
+		handler.on<TestNoParamsRequest>([&]() -> TaskFunction<std::vector<int>> {
+			return TaskFunction<std::vector<int>>([&]{
+				const auto context = MessageHandler::RequestContext::get();
+				auto callback = std::stop_callback(context.stopToken(), [&]{ observed = handler.isCanceled(context.id()); });
+				started.set_value();
+				(void)released.wait_for(std::chrono::seconds(5));
+				return std::vector<int>{};
+			});
+		});
+		auto response = handler.sendRequest<TestNoParamsRequest>();
+		handler.processNextMessage();
+		test::check(started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready, "started");
+		handler.cancel(response.requestId());
+		release.set_value();
+		handler.processNextMessage();
+		test::check(observed, "callbackObservedCancellation");
+		(void)getResult(response);
+	});
+
+	app.addTest("MessageLog/CallbackCanRegisterAnotherCallback", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto registered = false;
+		auto secondCount = 0;
+		handler.setMessageLogLevel(MessageHandler::MessageLogLevel::Info);
+		handler.addMessageLogCallback([&](const MessageHandler::MessageLog&){
+			if(!registered)
+			{
+				registered = true;
+				handler.addMessageLogCallback([&](const MessageHandler::MessageLog&){ ++secondCount; });
+			}
+		});
+		handler.sendNotification<TestNoParamsNotification>();
+		handler.processNextMessage();
+		test::compare(secondCount, 1);
+	});
+
+	app.addTest("Notification/ThrowingDeferredCallableDoesNotStopWorkers", [](bool withParams){
+		auto stream = LoopbackStream();
+		auto survived = std::promise<void>();
+		auto future = survived.get_future();
+		{
+			auto handler = MessageHandler(Connection(stream), 1);
+			if(withParams)
+			{
+				handler.on<TestNotification>([](std::vector<int>) -> TaskFunction<void> { return TaskFunction<void>([]{ throw std::runtime_error("failed"); }); });
+				handler.sendNotification<TestNotification>({1});
+			}
+			else
+			{
+				handler.on<TestNoParamsNotification>([]() -> TaskFunction<void> { return TaskFunction<void>([]{ throw std::runtime_error("failed"); }); });
+				handler.sendNotification<TestNoParamsNotification>();
+			}
+			handler.processNextMessage();
+			handler.onCustom<GenericNotificationNoParams>("after", [&]() -> TaskFunction<void> { return TaskFunction<void>([&]{ survived.set_value(); }); });
+			handler.sendCustomNotification<GenericNotificationNoParams>("after");
+			handler.processNextMessage();
+		}
+		test::check(future.wait_for(std::chrono::seconds(2)) == std::future_status::ready, "nextTaskRan");
+		test::check(stream.empty(), "noResponse");
+	})({{"WithParams", {true}}, {"NoParams", {false}}});
+
+	app.addTest("Batch/InvalidEntriesAndUnknownMethodsShareResponseArray", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		handler.on<TestNoParamsRequest>([]{ return std::vector<int>{42}; });
+		const auto message = makeMessage(R"([1,{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},{"jsonrpc":"2.0","id":2,"method":"unknown"},{"bad":"entry"}])");
+		stream.write(message.data(), message.size());
+		handler.processNextMessage();
+		const auto response = parseMessageBody(stream.takeAll());
+		test::check(response.isArray(), "singleBatchResponse");
+		test::compare(response.array().size(), 4);
+		auto invalid = 0;
+		auto successful = 0;
+		auto unknown = 0;
+		for(const auto& entry : response.array())
+		{
+			const auto& object = entry.object();
+			if(object.get("id").isNull())
+			{
+				test::compare(object.get("error").object().get("code").integer(), MessageError::InvalidRequest);
+				++invalid;
+			}
+			else if(object.get("id").integer() == 1)
+			{
+				test::compare(object.get("result").array().front().integer(), 42);
+				++successful;
+			}
+			else
+			{
+				test::compare(object.get("error").object().get("code").integer(), MessageError::MethodNotFound);
+				++unknown;
+			}
+		}
+		test::compare(invalid, 2);
+		test::compare(successful, 1);
+		test::compare(unknown, 1);
+	});
+
+	app.addTest("Error/InvalidResultSerialization", [](bool deferred){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		handler.on<InvalidResultRequest>([&]() -> RequestResult<InvalidResultRequest::Result> {
+			if(deferred)
+				return TaskFunction<InvalidResultRequest::Result>([]{ return InvalidResultRequest::Result{1u, std::numeric_limits<unsigned int>::max()}; });
+			return InvalidResultRequest::Result{1u, std::numeric_limits<unsigned int>::max()};
+		});
+		auto response = handler.sendRequest<InvalidResultRequest>();
+		handler.processNextMessage();
+		handler.processNextMessage();
+		expectResponseError(response, MessageError::InternalError, "LSP uinteger is outside the expected range");
+	})({{"Synchronous", {false}}, {"Deferred", {true}}});
+
+	app.addTest("Batch/InvalidResultSerializationRollsBackItsPartialResponse", [](){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		handler.on<InvalidResultRequest>([]{ return InvalidResultRequest::Result{1u, std::numeric_limits<unsigned int>::max()}; });
+		handler.on<TestNoParamsRequest>([]{ return std::vector<int>{42}; });
+		const auto message = makeMessage(R"([{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},{"jsonrpc":"2.0","id":2,"method":"test/invalidResult"},{"jsonrpc":"2.0","id":3,"method":"test/noParamsRequest"}])");
+		stream.write(message.data(), message.size());
+		handler.processNextMessage();
+		const auto response = parseMessageBody(stream.takeAll());
+		test::compare(response.array().size(), 3);
+		test::compare(response.array()[0].object().get("result").array().front().integer(), 42);
+		test::compare(response.array()[1].object().get("error").object().get("code").integer(), MessageError::InternalError);
+		test::compare(response.array()[2].object().get("result").array().front().integer(), 42);
+	});
+
+	app.addTest("Registration/ReleasedCaptureCanRegisterAHandler", [](bool remove){
+		auto stream = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto released = false;
+		auto capture = std::shared_ptr<int>(new int(42), [&](int* value){
+			delete value;
+			handler.onCustom<GenericNotificationNoParams>("from-release", []{});
+			released = true;
+		});
+		handler.on<TestNoParamsRequest>([capture = std::move(capture)]{ return std::vector<int>{42}; });
+
+		if(remove)
+			handler.remove(std::string(TestNoParamsRequest::Method));
+		else
+			handler.on<TestNoParamsRequest>([]{ return std::vector<int>{}; });
+
+		test::check(released, "captureReleasedWithoutRegistryLock");
+	})({{"Remove", {true}}, {"Replace", {false}}});
+
+	app.addTest("Request/FailedWriteCaptureCanSendAnotherRequest", [](){
+		struct FailingStream : LoopbackStream{
+			void write(const char*, std::size_t) override { throw io::Error("failed write"); }
+		};
+		auto stream = FailingStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto reentered = false;
+		auto capture = std::shared_ptr<int>(new int(42), [&](int* value){
+			delete value;
+			try
+			{
+				handler.sendRequest<TestNoParamsRequest>([](std::vector<int>){});
+			}
+			catch(const ConnectionError&)
+			{
+				reentered = true;
+			}
+		});
+		test::expectException<ConnectionError>([&]{
+			handler.sendRequest<TestNoParamsRequest>([capture = std::move(capture)](std::vector<int>){});
+		});
+		test::check(reentered, "captureReleasedWithoutPendingLock");
 	});
 
 	return app.main(argc, argv);

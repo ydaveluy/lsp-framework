@@ -4,15 +4,15 @@
 namespace lsp::jsonrpc{
 namespace{
 
-void writeMessageBase(json::ObjectWriter& writer, const MessageId* id = nullptr, std::string_view method = {})
+void writeMessageBase(json::ObjectWriter& writer, const MessageId* id = nullptr, std::optional<std::string_view> method = {})
 {
 	writer.write("jsonrpc", "2.0");
 
 	if(id)
 		writer.write("id", *id);
 
-	if(!method.empty())
-		writer.write("method", method);
+	if(method.has_value())
+		writer.write("method", *method);
 }
 
 } // namespace
@@ -112,6 +112,19 @@ auto ResponseWriter::writeError(json::ObjectWriter&& objectWriter, const Message
 BatchWriter::BatchWriter(json::ArrayWriter&& writer)
 	: m_writer(std::move(writer))
 {
+}
+
+auto BatchWriter::checkpoint() const -> Checkpoint
+{
+	return {m_writer.m_writer->m_text.size(), m_writer.m_writer->m_nestingLevel, m_writer.m_first, m_empty};
+}
+
+void BatchWriter::rollback(Checkpoint checkpoint)
+{
+	m_writer.m_writer->m_text.resize(checkpoint.size);
+	m_writer.m_writer->m_nestingLevel = checkpoint.nestingLevel;
+	m_writer.m_first = checkpoint.first;
+	m_empty = checkpoint.empty;
 }
 
 void BatchWriter::finalize()

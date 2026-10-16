@@ -27,6 +27,7 @@ public:
 	template<typename F, typename... Args>
 	requires std::is_invocable_r_v<R, std::decay_t<F>, std::decay_t<Args>...> &&
 					 std::is_nothrow_move_constructible_v<std::decay_t<F>> &&
+					 std::constructible_from<std::decay_t<F>, F&&> &&
 					 (std::is_nothrow_move_constructible_v<std::decay_t<Args>> && ...) &&
 					 (std::constructible_from<std::decay_t<Args>, Args&&> && ...)
 	TaskFunction(F&& f, Args&&... args)
@@ -50,8 +51,18 @@ public:
 			mem = m_storage.local;
 		}
 
-		new(mem) ImplType(std::forward<F>(f), std::forward<Args>(args)...);
-		m_storage.isValid = true;
+		try
+		{
+			new(mem) ImplType(std::forward<F>(f), std::forward<Args>(args)...);
+			m_storage.isValid = true;
+		}
+		catch(...)
+		{
+			if(m_storage.isAllocated)
+				operator delete(m_storage.heap);
+
+			throw;
+		}
 	}
 
 	~TaskFunction()
@@ -132,8 +143,9 @@ private:
 		[[no_unique_address]]
 		std::tuple<Args...> storedArgs;
 
-		Impl(F&& f, Args... args)
-			: func(std::forward<F>(f))
+		template<typename Func>
+		Impl(Func&& f, Args... args)
+			: func(std::forward<Func>(f))
 			, storedArgs(std::move(args)...)
 		{
 		}

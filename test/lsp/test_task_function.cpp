@@ -170,5 +170,35 @@ int main(int argc, char** argv)
 		static_assert(!std::constructible_from<TaskFunction<int>, void(*)()>);
 	});
 
+	app.addTest("TaskFunction/LvalueCallableIsCopied", [](){
+		auto callable = [value = 42]{ return value; };
+		auto task = TaskFunction<int>(callable);
+		test::compare(std::move(task).run(), 42);
+		test::compare(callable(), 42);
+	});
+
+	app.addTest("TaskFunction/ThrowingHeapCaptureCopyDoesNotLeak", [](){
+		struct Callable{
+			std::array<int, 64> padding{};
+			Callable() = default;
+			Callable(Callable&&) noexcept = default;
+			Callable(const Callable&){ throw std::runtime_error("copy failed"); }
+			void operator()(){}
+		};
+		auto callable = Callable();
+		test::expectException<std::runtime_error>([&]{ auto task = TaskFunction<void>(callable); }, "copy failed");
+	});
+
+	app.addTest("TaskFunction/ThrowingBoundArgumentCopyDoesNotLeak", [](){
+		struct Argument{
+			std::array<int, 64> padding{};
+			Argument() = default;
+			Argument(Argument&&) noexcept = default;
+			Argument(const Argument&){ throw std::runtime_error("argument copy failed"); }
+		};
+		auto argument = Argument();
+		test::expectException<std::runtime_error>([&]{ auto task = TaskFunction<void>([](Argument){}, argument); }, "argument copy failed");
+	});
+
 	return app.main(argc, argv);
 }

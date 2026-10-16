@@ -33,7 +33,17 @@ EndpointBase::EndpointBase(io::Stream& stream)
 	messageHandler().addMessageLogCallback(
 		[this](const MessageHandler::MessageLog& msgLog)
 		{
-			if(!m_logHook || msgLog.method == "$/logTrace")
+			if(msgLog.method == "$/logTrace")
+				return;
+
+			auto hook = std::shared_ptr<LogHook>();
+
+			{
+				const auto lock = std::lock_guard(m_logHookMutex);
+				hook = m_logHook;
+			}
+
+			if(!hook || !*hook)
 				return;
 
 			const auto idString = [&id = msgLog.id]() -> std::string
@@ -125,7 +135,7 @@ EndpointBase::EndpointBase(io::Stream& stream)
 				verbose += ": " + *msgLog.payload;
 			}
 
-			m_logHook(message, verbose);
+			(*hook)(message, verbose);
 		});
 }
 
@@ -184,7 +194,12 @@ void EndpointBase::customNotification(std::string_view method)
 
 void EndpointBase::setLogHook(LogHook hook)
 {
-	m_logHook = std::move(hook);
+	auto replacement = hook ? std::make_shared<LogHook>(std::move(hook)) : nullptr;
+
+	{
+		const auto lock = std::lock_guard(m_logHookMutex);
+		m_logHook.swap(replacement);
+	}
 }
 
 /*
@@ -249,25 +264,27 @@ auto ServerEndpointBase::isInitialized() const -> bool
 template<>
 void ServerEndpointBase::preMethodCall<requests::Initialize, InitializeParams>(const InitializeParams& params)
 {
-	if(isInitialized())
+	// Reserve initialization before reading readiness published by a worker.
+	const auto acquired = !m_initializing.exchange(true);
+
+	if(!acquired || isInitialized())
+	{
+		if(acquired)
+			m_initializing = false;
+
 		throw lsp::RequestError(lsp::MessageError::InvalidRequest, "Server already initialized");
+	}
 
 	if(params.trace.has_value())
 	{
-		switch(*params.trace)
-		{
-		case TraceValue::Off:
+		const auto trace = params.trace->value();
+
+		if(trace == "off")
 			messageHandler().setMessageLogLevel(MessageHandler::MessageLogLevel::Off);
-			break;
-		case TraceValue::Messages:
+		else if(trace == "messages")
 			messageHandler().setMessageLogLevel(MessageHandler::MessageLogLevel::Info);
-			break;
-		case TraceValue::Verbose:
+		else if(trace == "verbose")
 			messageHandler().setMessageLogLevel(MessageHandler::MessageLogLevel::InfoAndPayload);
-			break;
-		default:
-			break;
-		}
 	}
 }
 
@@ -276,6 +293,44 @@ void ServerEndpointBase::postMethodCall<requests::Initialize>()
 {
 	if(state() == State::Uninitialized)
 		setState(State::Active);
+
+	m_initializing = false;
+}
+
+auto ServerEndpointBase::completeInitialize(RequestResult<InitializeResult> result) -> RequestResult<InitializeResult>
+{
+	if(!result.isDeferred())
+	{
+		auto value = result.get();
+		postMethodCall<requests::Initialize>();
+		return value;
+	}
+
+	return TaskFunction<InitializeResult>([
+		endpoint = static_cast<EndpointBase*>(this),
+		result = std::make_unique<RequestResult<InitializeResult>>(std::move(result))]() mutable
+	{
+		try
+		{
+			auto value = result->get();
+
+			if(endpoint->state() == State::Uninitialized)
+				endpoint->setState(State::Active);
+
+			endpoint->m_initializing = false;
+			return value;
+		}
+		catch(...)
+		{
+			endpoint->m_initializing = false;
+			throw;
+		}
+	});
+}
+
+void ServerEndpointBase::initializeFailed()
+{
+	m_initializing = false;
 }
 
 void ServerEndpointBase::verifyInitialized() const

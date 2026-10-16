@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <unordered_map>
@@ -194,12 +195,14 @@ private:
 	};
 
 	// General
-	Connection                                      m_connection;
-	std::atomic<MessageLogLevel>                    m_msgLogLevel = MessageHandler::MessageLogLevel::Off;
-	std::vector<MessageLogCallback>                 m_msgLogCallbacks;
+	Connection                                       m_connection;
+	std::atomic<MessageLogLevel>                     m_msgLogLevel = MessageHandler::MessageLogLevel::Off;
+	mutable std::mutex                               m_msgLogCallbacksMutex;
+	std::vector<std::shared_ptr<MessageLogCallback>> m_msgLogCallbacks;
 	// Incoming requests
 	std::mutex                                      m_requestHandlersMutex;
-	std::unordered_map<std::string, HandlerWrapper> m_requestHandlersByMethod;
+	std::unordered_map<std::string, std::shared_ptr<HandlerWrapper>> m_requestHandlersByMethod;
+	std::unordered_map<std::string, std::shared_ptr<HandlerWrapper>> m_notificationHandlersByMethod;
 	std::mutex                                      m_activeRequestMutex;
 	std::vector<ActiveRequest>                      m_activeRequests;
 	// Outgoing requests
@@ -218,13 +221,17 @@ private:
 
 	void dispatchMessageLog(const MessageLog& msgLog);
 
+	template<typename T>
+	void deferNotification(T&& result);
+
 	template<typename M>
 	void sendResponse(RequestResult<typename M::Result>& result, Connection::BatchSender* batchSender);
 
 	void processRequest(jsonrpc::Request&& request, Connection::BatchSender* batchSender);
 	void processResponse(jsonrpc::Response&& response);
-	void addHandler(std::string_view method, HandlerWrapper&& handlerFunc);
-	void addPendingRequest(PendingRequestPtr pendingRequest);
+	void addHandler(MessageKind kind, std::string_view method, HandlerWrapper&& handlerFunc);
+	void removePendingRequest(const RequestId& id);
+	void submitPendingRequest(PendingRequestPtr pendingRequest, Connection::RequestSender& sender);
 	void sendErrorResponse(
 		std::string_view method,
 		RequestTimestamp requestTimestamp,
@@ -270,7 +277,8 @@ private:
 	template<typename T, typename F, typename E>
 	class PendingRequestCallback final : public PendingRequestBase{
 	public:
-		PendingRequestCallback(std::string method, RequestTimestamp timestamp, RequestId id, F&& then, E&& error);
+		template<typename Then, typename Error>
+		PendingRequestCallback(std::string method, RequestTimestamp timestamp, RequestId id, Then&& then, Error&& error);
 
 		void setValue(json::Value&& json) override;
 		void setError(ResponseError&& error) override;

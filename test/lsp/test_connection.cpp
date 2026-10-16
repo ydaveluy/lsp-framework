@@ -216,6 +216,14 @@ int main(int argc, char** argv)
 		 {"", "Connection lost"}},
 		{"EofMidHeader",
 		 {"Content-Length: 5\r\n", "Connection lost"}},
+		{"EofInsideHeaderField",
+		 {"Content-Length: 5", "Connection lost"}},
+		{"EofInsideUnknownHeaderField",
+		 {"Content-Length: 5\r\nX-Test: unfinished", "Connection lost"}},
+		{"MissingContentLength",
+		 {"Content-Type: application/vscode-jsonrpc\r\n\r\n{}", "Protocol: Missing Content-Length header field"}},
+		{"HeaderFieldWithoutColon",
+		 {"Content-Length: 2\r\ninvalid\r\n\r\n{}", "Protocol: Header field must contain ':'"}},
 		{"BareNewlineInHeaderField",
 		 {"Content-Length: 5\n", "Protocol: Unexpected '\\n' in header field, expected '\\r\\n'"}},
 		{"HeaderFieldMissingLineFeed",
@@ -231,17 +239,44 @@ int main(int argc, char** argv)
 		{"InvalidContentType",
 		 {makeMessage(R"({"jsonrpc":"2.0","method":"foo"})", "text/plain"),
 		  "Protocol: Unsupported or invalid content type: text/plain"}},
+		{"EmptyContentType",
+		 {"Content-Length: 2\r\nContent-Type:\r\n\r\n{}",
+		  "Protocol: Unsupported or invalid content type: "}},
+		{"MediaTypePrefixIsNotAccepted",
+		 {makeMessage(R"({"jsonrpc":"2.0","method":"foo"})", "application/vscode-jsonrpc-invalid"),
+		  "Protocol: Unsupported or invalid content type: application/vscode-jsonrpc-invalid"}},
+		{"UppercaseUnsupportedCharset",
+		 {makeMessage(R"({"jsonrpc":"2.0","method":"foo"})", "application/vscode-jsonrpc; CHARSET=ascii"),
+		  "Protocol: Unsupported or invalid character encoding: ascii"}},
 		{"UnsupportedCharset",
 		 {makeMessage(R"({"jsonrpc":"2.0","method":"foo"})", "application/vscode-jsonrpc; charset=ascii"),
 		  "Protocol: Unsupported or invalid character encoding: ascii"}},
 	});
 
-	app.addTest("ReadMessage/InvalidFieldTypeWritesNoResponse", [](){
-		auto stream     = MemoryStream(makeMessage(R"({"jsonrpc":"2.0","method":123})"));
+	app.addTest("ReadMessage/RecoversFromInvalidFieldTypes", [](std::string badBody)
+	{
+		auto stream = MemoryStream(makeMessage(badBody) + makeMessage(R"({"jsonrpc":"2.0","method":"next"})"));
 		auto connection = Connection(stream);
+		auto message = connection.readMessage();
+		test::compare(std::get<jsonrpc::Request>(std::get<jsonrpc::Message>(message)).method, "next");
+		const auto response = parseMessageBody(stream.output());
+		test::compare(response.object().get("error").object().get("code").integer(), jsonrpc::Error::InvalidRequest);
+	})({
+		{"Method", {R"({"jsonrpc":"2.0","method":123})"}},
+		{"Error", {R"({"jsonrpc":"2.0","id":1,"error":123})"}},
+		{"BatchEntry", {R"([1])"}},
+	});
 
-		test::expectException<ConnectionError>([&](){ (void)connection.readMessage(); }, "JSON value is not string");
-		test::check(stream.output().empty(), "noResponseWritten");
+	app.addTest("ReadMessage/ContentTypeTokens", [](std::string contentType)
+	{
+		auto stream = MemoryStream(makeMessage(R"({"jsonrpc":"2.0","method":"foo"})", contentType));
+		auto connection = Connection(stream);
+		auto message = connection.readMessage();
+		test::compare(std::get<jsonrpc::Request>(std::get<jsonrpc::Message>(message)).method, "foo");
+	})({
+		{"Uppercase", {"Application/Vscode-Jsonrpc; Charset=UTF-8"}},
+		{"Quoted", {"application/vscode-jsonrpc; charset=\"utf8\""}},
+		{"Spaced", {"application/vscode-jsonrpc ; charset = utf-8 ; ignored=value"}},
 	});
 
 	app.addTest("Send/StreamFailureIsWrappedAsConnectionError", [](){
@@ -287,6 +322,7 @@ int main(int argc, char** argv)
 			sender.submit();
 		});
 
+		test::check(out.find("\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n") != std::string::npos, "defaultContentType");
 		test::compare(parseMessageBody(out), json::parse(R"({"jsonrpc":"2.0","id":1,"method":"foo"})"));
 	});
 

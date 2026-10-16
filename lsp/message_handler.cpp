@@ -66,15 +66,24 @@ MessageHandler::~MessageHandler()
 {
 	// Joining the response threads waits for every request still computing:
 	// stopping them first lets a request that observes its token end early.
-	const auto lock = std::lock_guard(m_activeRequestMutex);
+	auto sources = std::vector<std::stop_source>();
 
-	for(auto& request : m_activeRequests)
-		request.source.request_stop();
+	{
+		const auto lock = std::lock_guard(m_activeRequestMutex);
+		sources.reserve(m_activeRequests.size());
+
+		for(const auto& request : m_activeRequests)
+			sources.push_back(request.source);
+	}
+
+	for(auto& source : sources)
+		source.request_stop();
 }
 
 void MessageHandler::processNextMessage()
 {
-	auto messageOrBatch = m_connection.readMessage();
+	auto invalidBatch = std::vector<jsonrpc::Error>();
+	auto messageOrBatch = m_connection.readMessage(&invalidBatch);
 
 	if(auto* const message = std::get_if<jsonrpc::Message>(&messageOrBatch))
 	{
@@ -87,6 +96,11 @@ void MessageHandler::processNextMessage()
 	{
 		auto& batch       = std::get<jsonrpc::MessageBatch>(messageOrBatch);
 		auto  batchSender = m_connection.messageBatch();
+
+		for(const auto& error : invalidBatch)
+		{
+			auto writer = batchSender.writeError(json::Null(), error.code, error.message);
+		}
 
 		for(auto& msg : batch)
 		{
@@ -115,19 +129,30 @@ void MessageHandler::setMaxResponseThreads(unsigned int maxResponseThreads)
 
 void MessageHandler::remove(const std::string& method)
 {
-	const auto lock = std::lock_guard(m_requestHandlersMutex);
+	decltype(m_requestHandlersByMethod)::node_type request;
+	decltype(m_notificationHandlersByMethod)::node_type notification;
 
-	if(const auto it = m_requestHandlersByMethod.find(method); it != m_requestHandlersByMethod.end())
-		m_requestHandlersByMethod.erase(it);
+	{
+		const auto lock = std::lock_guard(m_requestHandlersMutex);
+		request = m_requestHandlersByMethod.extract(method);
+		notification = m_notificationHandlersByMethod.extract(method);
+	}
 }
 
 void MessageHandler::cancel(const RequestId& id)
 {
-	const auto lock = std::lock_guard(m_activeRequestMutex);
-	const auto it   = std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; });
+	auto source = std::optional<std::stop_source>();
 
-	if(it != m_activeRequests.end())
-		it->source.request_stop();
+	{
+		const auto lock = std::lock_guard(m_activeRequestMutex);
+		const auto it = std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; });
+
+		if(it != m_activeRequests.end())
+			source = it->source;
+	}
+
+	if(source)
+		source->request_stop();
 }
 
 auto MessageHandler::isCanceled(const RequestId& id) -> bool
@@ -152,18 +177,32 @@ void MessageHandler::setMessageLogLevel(MessageLogLevel msgLogLevel)
 void MessageHandler::addMessageLogCallback(MessageLogCallback callback)
 {
 	if(callback)
-		m_msgLogCallbacks.emplace_back(std::move(callback));
+	{
+		const auto lock = std::lock_guard(m_msgLogCallbacksMutex);
+		m_msgLogCallbacks.push_back(std::make_shared<MessageLogCallback>(std::move(callback)));
+	}
 }
 
 auto MessageHandler::shouldLog() const -> bool
 {
-	return !m_msgLogCallbacks.empty() && m_msgLogLevel.load() != MessageLogLevel::Off;
+	if(m_msgLogLevel.load() == MessageLogLevel::Off)
+		return false;
+
+	const auto lock = std::lock_guard(m_msgLogCallbacksMutex);
+	return !m_msgLogCallbacks.empty();
 }
 
 void MessageHandler::dispatchMessageLog(const MessageLog& msgLog)
 {
-	for(const auto& callback : m_msgLogCallbacks)
-		callback(msgLog);
+	auto callbacks = std::vector<std::shared_ptr<MessageLogCallback>>();
+
+	{
+		const auto lock = std::lock_guard(m_msgLogCallbacksMutex);
+		callbacks = m_msgLogCallbacks;
+	}
+
+	for(const auto& callback : callbacks)
+		(*callback)(msgLog);
 }
 
 void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::BatchSender* batchSender)
@@ -184,16 +223,24 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 			dispatchMessageLog(msgLog);
 	}
 
-	const auto lock = std::lock_guard(m_requestHandlersMutex);
+	auto handler = std::shared_ptr<HandlerWrapper>();
 
-	if(const auto handlerIt = m_requestHandlersByMethod.find(request.method);
-	   handlerIt != m_requestHandlersByMethod.end() && handlerIt->second)
+	{
+		const auto lock = std::lock_guard(m_requestHandlersMutex);
+
+		const auto& handlers = request.isNotification() ? m_notificationHandlersByMethod : m_requestHandlersByMethod;
+
+		if(const auto it = handlers.find(request.method); it != handlers.end())
+			handler = it->second;
+	}
+
+	if(handler && *handler)
 	{
 		try
 		{
 			if(request.isNotification())
 			{
-				handlerIt->second(
+				(*handler)(
 					request.params.has_value() ? std::move(*request.params) : json::Null{},
 					nullptr);
 			}
@@ -203,7 +250,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 				// Instantiate request context for request handler
 				auto context = RequestContext(*this, request.method, *request.id, requestTimestamp);
 
-				handlerIt->second(
+				(*handler)(
 					request.params.has_value() ? std::move(*request.params) : json::Null{},
 					batchSender);
 			}
@@ -254,7 +301,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 				MessageError::MethodNotFound,
 				"Method not found",
 				{},
-				nullptr);
+				batchSender);
 		}
 	}
 }
@@ -326,10 +373,15 @@ void MessageHandler::processResponse(jsonrpc::Response&& response)
 	}
 }
 
-void MessageHandler::addHandler(std::string_view method, HandlerWrapper&& handlerFunc)
+void MessageHandler::addHandler(MessageKind kind, std::string_view method, HandlerWrapper&& handlerFunc)
 {
-	const auto lock = std::lock_guard(m_requestHandlersMutex);
-	m_requestHandlersByMethod[std::string(method)] = std::move(handlerFunc);
+	auto handler = std::make_shared<HandlerWrapper>(std::move(handlerFunc));
+
+	{
+		const auto lock = std::lock_guard(m_requestHandlersMutex);
+		auto& handlers = kind == MessageKind::Request ? m_requestHandlersByMethod : m_notificationHandlersByMethod;
+		handlers[std::string(method)].swap(handler);
+	}
 }
 
 void MessageHandler::addActive(const RequestId& id)
@@ -343,14 +395,44 @@ void MessageHandler::removeActive(const RequestId& id)
 {
 	const auto lock = std::lock_guard(m_activeRequestMutex);
 	const auto it   = std::ranges::find_if(m_activeRequests, [&id](const auto& r){ return r.id == id; });
-	assert(it != m_activeRequests.end());
-	m_activeRequests.erase(it);
+	if(it != m_activeRequests.end())
+		m_activeRequests.erase(it);
 }
 
-void MessageHandler::addPendingRequest(PendingRequestPtr pendingRequest)
+void MessageHandler::submitPendingRequest(PendingRequestPtr pendingRequest, Connection::RequestSender& sender)
 {
-	const auto lock = std::lock_guard(m_pendingRequestsMutex);
-	m_pendingRequests.emplace_back(std::move(pendingRequest));
+	const auto id = pendingRequest->requestId();
+
+	{
+		const auto lock = std::lock_guard(m_pendingRequestsMutex);
+		m_pendingRequests.emplace_back(std::move(pendingRequest));
+	}
+
+	try
+	{
+		sender.submit();
+	}
+	catch(...)
+	{
+		removePendingRequest(id);
+		throw;
+	}
+}
+
+void MessageHandler::removePendingRequest(const RequestId& id)
+{
+	auto removed = PendingRequestPtr();
+
+	{
+		const auto lock = std::lock_guard(m_pendingRequestsMutex);
+		const auto it = std::ranges::find_if(m_pendingRequests, [&id](const auto& request){ return request->requestId() == id; });
+
+		if(it != m_pendingRequests.end())
+		{
+			removed = std::move(*it);
+			m_pendingRequests.erase(it);
+		}
+	}
 }
 
 void MessageHandler::sendErrorResponse(

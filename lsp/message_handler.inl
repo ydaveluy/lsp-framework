@@ -30,9 +30,6 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 {
 	const auto ctx         = RequestContext::get();
 	auto       resultValue = std::optional<typename M::Result>();
-
-	// Result.get() can throw if the result invokes a callback or calls std::future::get.
-	// Only that is answered with an error: a failure to write the answer is not the request's.
 	try
 	{
 		resultValue.emplace(result.get());
@@ -50,35 +47,63 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 		return;
 	}
 
+	const auto checkpoint = batchSender ? std::optional(batchSender->checkpoint()) : std::nullopt;
+
+	try
+	{
+		if(shouldLog())
+		{
+			auto msgLog = MessageLog{
+				.incoming        = false,
+				.method          = ctx.method(),
+				.requestDuration = std::chrono::steady_clock::now() - ctx.timestamp(),
+				.id              = ctx.id(),
+			};
+
+			dispatchMessageLog(msgLog, *resultValue);
+		}
+
+		if(batchSender)
+		{
+			auto responseWriter = batchSender->writeResponse(ctx.id());
+			responseWriter.writeData(
+				[](std::string_view key, const typename M::Result& value, json::ObjectWriter& objectWriter)
+				{
+					writeJson(key, value, objectWriter);
+				}, *resultValue);
+		}
+		else
+		{
+			auto responseSender = m_connection.response(result.requestId());
+			responseSender.writeData(*resultValue);
+			responseSender.submit();
+		}
+	}
+	catch(const ConnectionError&)
+	{
+		removeActive(ctx.id());
+		throw;
+	}
+	catch(const RequestError& e)
+	{
+		if(checkpoint)
+			batchSender->rollback(*checkpoint);
+
+		removeActive(ctx.id());
+		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), e.code(), e.what(), e.data(), batchSender);
+		return;
+	}
+	catch(const std::exception& e)
+	{
+		if(checkpoint)
+			batchSender->rollback(*checkpoint);
+
+		removeActive(ctx.id());
+		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {}, batchSender);
+		return;
+	}
+
 	removeActive(ctx.id());
-
-	if(shouldLog())
-	{
-		auto msgLog = MessageLog{
-			.incoming        = false,
-			.method          = ctx.method(),
-			.requestDuration = std::chrono::steady_clock::now() - ctx.timestamp(),
-			.id              = ctx.id(),
-		};
-
-		dispatchMessageLog(msgLog, *resultValue);
-	}
-
-	if(batchSender)
-	{
-		auto responseWriter = batchSender->writeResponse(ctx.id());
-		responseWriter.writeData(
-			[](std::string_view key, const typename M::Result& value, json::ObjectWriter& objectWriter)
-			{
-				writeJson(key, value, objectWriter);
-			}, *resultValue);
-	}
-	else
-	{
-		auto responseSender = m_connection.response(result.requestId());
-		responseSender.writeData(*resultValue);
-		responseSender.submit();
-	}
 }
 
 /*
@@ -95,7 +120,7 @@ template<typename M, typename F>
 requires (M::Kind == MessageKind::Request)
 auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageHandler&
 {
-	addHandler(method,
+	addHandler(M::Kind, method,
 		[this, method = std::string(method), callback = std::forward<F>(callback)](
 			[[maybe_unused]] json::Value&& json, [[maybe_unused]] Connection::BatchSender* batchSender) mutable
 		{
@@ -162,11 +187,27 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 	return *this;
 }
 
+template<typename T>
+void MessageHandler::deferNotification(T&& result)
+{
+	m_threadPool.addTask([result = std::forward<T>(result)]() mutable
+	{
+		try
+		{
+			if constexpr(IsFuture<std::decay_t<T>>{})
+				(void)result.get();
+			else
+				(void)std::move(result)();
+		}
+		catch(const std::exception&){}
+	});
+}
+
 template<typename M, typename F>
 requires (M::Kind == MessageKind::Notification)
 auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageHandler&
 {
-	addHandler(method,
+	addHandler(M::Kind, method,
 		[this, callback = std::forward<F>(callback)](
 			[[maybe_unused]] json::Value&& json, [[maybe_unused]] Connection::BatchSender* batchSender) mutable
 		{
@@ -190,10 +231,9 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 					return;
 				}
 
-				if constexpr(IsFuture<std::invoke_result_t<F, typename M::Params>>{})
-					m_threadPool.addTask([future = callback(std::move(params))](){ future.wait(); });
-				else if constexpr(std::invocable<std::invoke_result_t<F, typename M::Params>>)
-					m_threadPool.addTask(callback(std::move(params)));
+				using Result = std::invoke_result_t<F, typename M::Params>;
+				if constexpr(IsFuture<Result>{} || std::invocable<Result>)
+					deferNotification(callback(std::move(params)));
 				else
 					callback(std::move(params));
 			}
@@ -201,10 +241,9 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 			{
 				static_assert(std::invocable<F>, "Notification callback must be callable without params");
 
-				if constexpr(IsFuture<std::invoke_result_t<F>>{})
-					m_threadPool.addTask([future = callback()](){ future.wait(); });
-				else if constexpr(std::invocable<std::invoke_result_t<F>>)
-					m_threadPool.addTask(callback());
+				using Result = std::invoke_result_t<F>;
+				if constexpr(IsFuture<Result>{} || std::invocable<Result>)
+					deferNotification(callback());
 				else
 					callback();
 			}
@@ -251,8 +290,7 @@ auto MessageHandler::sendCustomRequest(std::string_view method, const typename M
 	auto requestSender = m_connection.request(method, requestId);
 
 	requestSender.writeParams(params);
-	addPendingRequest(std::move(result));
-	requestSender.submit();
+	submitPendingRequest(std::move(result), requestSender);
 
 	return requestId;
 }
@@ -290,8 +328,7 @@ auto MessageHandler::sendCustomRequest(std::string_view method, F&& then, E&& er
 		std::forward<E>(error));
 	auto requestSender = m_connection.request(method, requestId);
 
-	addPendingRequest(std::move(result));
-	requestSender.submit();
+	submitPendingRequest(std::move(result), requestSender);
 
 	return requestId;
 }
@@ -326,8 +363,7 @@ auto MessageHandler::sendCustomRequest(std::string_view method, const typename M
 	auto       requestSender = m_connection.request(method, requestId);
 
 	requestSender.writeParams(params);
-	addPendingRequest(std::move(result));
-	requestSender.submit();
+	submitPendingRequest(std::move(result), requestSender);
 
 	return RequestResult(std::move(future), requestId);
 }
@@ -361,8 +397,7 @@ auto MessageHandler::sendCustomRequest(std::string_view method) -> RequestResult
 	auto       future        = result->future();
 	auto       requestSender = m_connection.request(method, requestId);
 
-	addPendingRequest(std::move(result));
-	requestSender.submit();
+	submitPendingRequest(std::move(result), requestSender);
 
 	return RequestResult(std::move(future), requestId);
 }
@@ -448,15 +483,16 @@ auto MessageHandler::PendingRequestBase::setValueFromJson(T& value, json::Value&
  */
 
 template<typename T, typename F, typename E>
+template<typename Then, typename Error>
 MessageHandler::PendingRequestCallback<T, F, E>::PendingRequestCallback(
 	std::string method,
 	RequestTimestamp timestamp,
 	RequestId id,
-	F&& then,
-	E&& error)
+	Then&& then,
+	Error&& error)
 	: PendingRequestBase(std::move(method), timestamp, std::move(id))
-	, m_then(std::forward<F>(then))
-	, m_error(std::forward<E>(error))
+	, m_then(std::forward<Then>(then))
+	, m_error(std::forward<Error>(error))
 {
 	static_assert(std::invocable<F, T>,
 		"Response callback must be callable with request result");

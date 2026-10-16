@@ -1,7 +1,11 @@
 #pragma once
 
+#include <cstddef>
+
 #include <lsp/json/writer.h>
 #include "jsonrpc.h"
+
+namespace lsp{ class MessageHandler; }
 
 namespace lsp::jsonrpc{
 
@@ -85,6 +89,17 @@ public:
 	[[nodiscard]] auto writeError(const MessageId& id, int code, std::string_view message) -> ResponseWriter;
 
 private:
+	friend class lsp::MessageHandler;
+
+	struct Checkpoint{
+		std::size_t size;
+		int nestingLevel;
+		bool first;
+		bool empty;
+	};
+
+	auto checkpoint() const -> Checkpoint;
+	void rollback(Checkpoint checkpoint);
 	bool              m_empty = true;
 	json::ArrayWriter m_writer;
 };

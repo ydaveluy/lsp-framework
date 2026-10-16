@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cmath>
+#include <limits>
 #include <lsp/jsonrpc/jsonrpc.h>
 
 namespace lsp::jsonrpc{
@@ -20,13 +22,27 @@ void verifyProtocolVersion(const json::Object& json)
 		throw ProtocolError("Invalid or unsupported jsonrpc version");
 }
 
+auto integerFromJson(const json::Value& json, std::string_view error) -> json::Integer
+{
+	if(json.isNumber())
+	{
+		const auto value = json.number();
+
+		if(value >= std::numeric_limits<json::Integer>::min() &&
+		   value <= std::numeric_limits<json::Integer>::max() && std::trunc(value) == value)
+			return static_cast<json::Integer>(value);
+	}
+
+	throw ProtocolError(std::string(error));
+}
+
 auto messageIdFromJson(json::Value& json) -> MessageId
 {
 	if(json.isString())
 		return std::move(json.string());
 
 	if(json.isNumber())
-		return static_cast<json::Integer>(json.number());
+		return integerFromJson(json, "Request id number must be an integer in range");
 
 	if(json.isNull())
 		return nullptr;
@@ -39,7 +55,12 @@ auto requestFromJson(json::Object& json) -> Request
 	verifyProtocolVersion(json);
 
 	auto request = Request();
-	request.method = std::move(json.get("method").string());
+	auto& method = json.get("method");
+
+	if(!method.isString())
+		throw ProtocolError("Request method must be a string");
+
+	request.method = std::move(method.string());
 
 	if(json.contains("id"))
 		request.id = messageIdFromJson(json.get("id"));
@@ -65,8 +86,10 @@ auto responseFromJson(json::Object& json) -> Response
 
 	auto response = Response();
 
-	if(json.contains("id"))
-		response.id = messageIdFromJson(json.get("id"));
+	if(!json.contains("id"))
+		throw ProtocolError("Response id is missing");
+
+	response.id = messageIdFromJson(json.get("id"));
 
 	if(json.contains("result"))
 		response.result = std::move(json.get("result"));
@@ -74,6 +97,9 @@ auto responseFromJson(json::Object& json) -> Response
 	if(json.contains("error"))
 	{
 		auto& error         = json.get("error");
+		if(!error.isObject())
+			throw ProtocolError("Response error must be an object");
+
 		auto& errorObj      = error.object();
 		auto& responseError = response.error.emplace();
 
@@ -85,7 +111,7 @@ auto responseFromJson(json::Object& json) -> Response
 		if(!errorCode.isNumber())
 			throw ProtocolError("Response error code must be a number");
 
-		responseError.code = static_cast<json::Integer>(errorCode.number());
+		responseError.code = integerFromJson(errorCode, "Response error code must be an integer in range");
 
 		if(!errorObj.contains("message"))
 			throw ProtocolError("Response error is missing the error message");
@@ -126,7 +152,12 @@ auto messageBatchFromJson(json::Array&& json) -> MessageBatch
 	batch.reserve(json.size());
 
 	for(auto& jsonMessage : json)
+	{
+		if(!jsonMessage.isObject())
+			throw ProtocolError("Message batch entry must be an object");
+
 		batch.push_back(messageFromJson(std::move(jsonMessage.object())));
+	}
 
 	return batch;
 }

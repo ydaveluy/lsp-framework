@@ -37,17 +37,35 @@ auto equalCaseInsensitive(std::string_view lhs, std::string_view rhs) -> bool
 
 void verifyContentType(std::string_view contentType)
 {
-	if(!contentType.starts_with("application/vscode-jsonrpc"))
+	const auto separator = contentType.find(';');
+	const auto mediaType = trimWhitespace(contentType.substr(0, separator));
+
+	if(!equalCaseInsensitive(mediaType, "application/vscode-jsonrpc"))
 		throw ConnectionError("Protocol: Unsupported or invalid content type: " + std::string(contentType));
 
-	constexpr auto charsetKey = std::string_view("charset=");
-	if(const auto idx = contentType.find(charsetKey); idx != std::string_view::npos)
-	{
-		auto charset = contentType.substr(idx + charsetKey.size());
-		charset = trimWhitespace(charset.substr(0, charset.find(';')));
+	auto parameters = separator == std::string_view::npos ? std::string_view() : contentType.substr(separator + 1);
 
-		if(charset != "utf-8" && charset != "utf8")
-			throw ConnectionError("Protocol: Unsupported or invalid character encoding: " + std::string{charset});
+	while(!parameters.empty())
+	{
+		const auto end = parameters.find(';');
+		const auto parameter = trimWhitespace(parameters.substr(0, end));
+		const auto equals = parameter.find('=');
+
+		if(equals != std::string_view::npos && equalCaseInsensitive(trimWhitespace(parameter.substr(0, equals)), "charset"))
+		{
+			auto charset = trimWhitespace(parameter.substr(equals + 1));
+
+			if(charset.size() >= 2 && charset.front() == '"' && charset.back() == '"')
+				charset = charset.substr(1, charset.size() - 2);
+
+			if(!equalCaseInsensitive(charset, "utf-8") && !equalCaseInsensitive(charset, "utf8"))
+				throw ConnectionError("Protocol: Unsupported or invalid character encoding: " + std::string(charset));
+		}
+
+		if(end == std::string_view::npos)
+			break;
+
+		parameters.remove_prefix(end + 1);
 	}
 }
 
@@ -122,7 +140,8 @@ struct Connection::Internal{
 
 struct Connection::MessageHeader{
 	std::size_t contentLength = 0;
-	std::string contentType   = "application/vscode-jsonrpc; charset=utf-8";
+	bool hasContentLength = false;
+	std::optional<std::string> contentType = std::nullopt;
 };
 
 Connection::Connection(io::Stream& stream)
@@ -135,6 +154,11 @@ Connection::Connection(Connection&&) noexcept            = default;
 Connection& Connection::operator=(Connection&&) noexcept = default;
 
 auto Connection::readMessage() -> Connection::Message
+{
+	return readMessage(nullptr);
+}
+
+auto Connection::readMessage(std::vector<jsonrpc::Error>* invalidBatch) -> Connection::Message
 {
 	for(;;) // Keep trying until a message was read or an unrecoverable error happened
 	{
@@ -155,7 +179,8 @@ auto Connection::readMessage() -> Connection::Message
 			readLock.unlock();
 
 			// Verify only after reading the entire message so no partially unread message is left in the stream
-			verifyContentType(header.contentType);
+			if(header.contentType)
+				verifyContentType(*header.contentType);
 
 			auto json = json::parse(content);
 
@@ -165,7 +190,28 @@ auto Connection::readMessage() -> Connection::Message
 			if(!json.isArray())
 				throw jsonrpc::ProtocolError("Message must be a json object or array");
 
-			return jsonrpc::messageBatchFromJson(std::move(json.array()));
+			if(!invalidBatch || json.array().empty())
+				return jsonrpc::messageBatchFromJson(std::move(json.array()));
+
+			auto batch = jsonrpc::MessageBatch();
+			batch.reserve(json.array().size());
+
+			for(auto& entry : json.array())
+			{
+				try
+				{
+					if(!entry.isObject())
+						throw jsonrpc::ProtocolError("Message batch entry must be an object");
+
+					batch.push_back(jsonrpc::messageFromJson(std::move(entry.object())));
+				}
+				catch(const jsonrpc::ProtocolError& e)
+				{
+					invalidBatch->push_back({jsonrpc::Error::InvalidRequest, e.what()});
+				}
+			}
+
+			return batch;
 		}
 		catch(const json::ParseError& e)
 		{
@@ -197,6 +243,9 @@ auto Connection::readMessageHeader(InputReader& reader) -> Connection::MessageHe
 	while(reader.peek() != '\r')
 		readNextMessageHeaderField(header, reader);
 
+	if(!header.hasContentLength)
+		throw ConnectionError("Protocol: Missing Content-Length header field");
+
 	if(reader.get() != '\r' || reader.get() != '\n')
 		throw ConnectionError("Protocol: Expected header to be terminated by '\\r\\n'");
 
@@ -207,30 +256,32 @@ void Connection::parseHeaderValue(MessageHeader& header, std::string_view line)
 {
 	const auto separatorIdx = line.find(':');
 
-	if(separatorIdx != std::string_view::npos)
+	if(separatorIdx == std::string_view::npos)
+		throw ConnectionError("Protocol: Header field must contain ':'");
+
+	const auto key   = trimWhitespace(line.substr(0, separatorIdx));
+	const auto value = trimWhitespace(line.substr(separatorIdx + 1));
+
+	if(equalCaseInsensitive(key, "Content-Length"))
 	{
-		const auto key   = trimWhitespace(line.substr(0, separatorIdx));
-		const auto value = trimWhitespace(line.substr(separatorIdx + 1));
+		const auto* first    = value.data();
+		const auto* last     = first + value.size();
+		const auto [ptr, ec] = std::from_chars(first, last, header.contentLength);
 
-		if(equalCaseInsensitive(key, "Content-Length"))
-		{
-			const auto* first    = value.data();
-			const auto* last     = first + value.size();
-			const auto [ptr, ec] = std::from_chars(first, last, header.contentLength);
+		if(ec != std::errc{} || ptr != last)
+			throw ConnectionError("Protocol: Invalid value for Content-Length header field");
 
-			if(ec != std::errc{} || ptr != last)
-				throw ConnectionError("Protocol: Invalid value for Content-Length header field");
-		}
-		else if(equalCaseInsensitive(key, "Content-Type"))
-		{
-			header.contentType = std::string{value.data(), value.size()};
-		}
+		header.hasContentLength = true;
+	}
+	else if(equalCaseInsensitive(key, "Content-Type"))
+	{
+		header.contentType = std::string{value.data(), value.size()};
 	}
 }
 
 void Connection::readNextMessageHeaderField(MessageHeader& header, InputReader& reader)
 {
-	if(reader.peek() == std::char_traits<char>::eof())
+	if(reader.peek() == io::Stream::Eof)
 		throw ConnectionError{"Connection lost"};
 
 	std::string lineData;
@@ -238,6 +289,9 @@ void Connection::readNextMessageHeaderField(MessageHeader& header, InputReader& 
 	while(reader.peek() != '\r')
 	{
 		const auto c = reader.get();
+
+		if(c == io::Stream::Eof)
+			throw ConnectionError("Connection lost");
 
 		if(c == '\n')
 			throw ConnectionError("Protocol: Unexpected '\\n' in header field, expected '\\r\\n'");
@@ -270,8 +324,10 @@ void Connection::writeMessageData(std::string_view content)
 
 auto Connection::messageHeaderString(const MessageHeader& header) -> std::string
 {
-	return "Content-Length: " + std::to_string(header.contentLength) + "\r\n" +
-	       "Content-Type: " + header.contentType + "\r\n\r\n";
+	auto text = "Content-Length: " + std::to_string(header.contentLength) + "\r\nContent-Type: ";
+	text += header.contentType ? std::string_view(*header.contentType) : "application/vscode-jsonrpc; charset=utf-8";
+	text += "\r\n\r\n";
+	return text;
 }
 
 auto Connection::request(std::string_view method, const jsonrpc::MessageId& id) -> Connection::RequestSender

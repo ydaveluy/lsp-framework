@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <lsp/thread_pool.h>
 
 namespace lsp{
@@ -6,6 +7,7 @@ ThreadPool::ThreadPool(unsigned int initialThreads, unsigned int maxThreads)
 	: m_maxThreads(std::max(maxThreads, 1u))
 {
 	const auto lock = std::lock_guard(m_mutex);
+	initialThreads = std::min(initialThreads, m_maxThreads);
 	m_threads.reserve(initialThreads);
 	m_waitForNewTasks = true;
 
@@ -48,6 +50,9 @@ void ThreadPool::setMaxThreads(unsigned int maxThreads)
 
 void ThreadPool::addTask(Task task)
 {
+	if(!task)
+		return;
+
 	auto lock = std::unique_lock(m_mutex);
 
 	if(!m_waitForNewTasks)

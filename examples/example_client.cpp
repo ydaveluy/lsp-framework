@@ -85,7 +85,7 @@ public:
 		auto params = lsp::InitializeParams();
 		params.processId = lsp::Process::currentProcessId();
 		params.rootUri   = lsp::Uri::fileUriFromPath(".");
-		params.trace     = lsp::TraceValue::Verbose;
+		params.trace.emplace("verbose");
 		m_endpoint.messageHandler().setMessageLogLevel(lsp::MessageHandler::MessageLogLevel::InfoAndPayload);
 
 		// ClientInfo only became a standalone type in 3.18
@@ -211,9 +211,10 @@ public:
 			{
 				m_endpoint.exit();
 			},
-			[](const lsp::ResponseError& e)
+			[this](const lsp::ResponseError& e)
 			{
 				logStdErr(std::string("shutdown failed: ") + e.what());
+				m_endpoint.exit();
 			});
 
 		if(m_messageThread.joinable())
@@ -318,9 +319,7 @@ auto parseArgs(int argc, char** argv) -> Args
 			const auto     portStr   = arg.substr(PortArg.size());
 			unsigned short port      = 0;
 			const auto     [ptr, ec] = std::from_chars(portStr.data(), portStr.data() + portStr.size(), port);
-			(void)ptr;
-
-			if(ec == std::errc{})
+			if(ec == std::errc{} && ptr == portStr.data() + portStr.size())
 				args.port = port;
 			else
 				logStdErr("invalid port '" + std::string(portStr) + '\'');

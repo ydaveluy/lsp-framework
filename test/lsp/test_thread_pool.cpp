@@ -159,5 +159,34 @@ int main(int argc, char** argv)
 		test::check(maxConcurrent.load() <= static_cast<int>(maxThreads), "neverExceedsMaxThreads");
 	});
 
+	app.addTest("ThreadPool/InitialThreadsRespectMaximum", [](){
+		auto pool = ThreadPool(4, 1);
+		auto current = std::atomic<int>(0);
+		auto maximum = std::atomic<int>(0);
+
+		for(auto i = 0; i < 12; ++i)
+		{
+			pool.addTask([&]{
+				const auto active = current.fetch_add(1) + 1;
+				auto previous = maximum.load();
+				while(active > previous && !maximum.compare_exchange_weak(previous, active)){}
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				current.fetch_sub(1);
+			});
+		}
+
+		pool.waitUntilFinished();
+		test::compare(maximum.load(), 1);
+	});
+
+	app.addTest("ThreadPool/EmptyTaskDoesNotRetireTheWorker", [](){
+		auto pool = ThreadPool(0, 1);
+		auto ran = std::atomic<bool>(false);
+		pool.addTask(ThreadPool::Task());
+		pool.addTask([&]{ ran = true; });
+		pool.waitUntilFinished();
+		test::check(ran.load(), "realTaskRan");
+	});
+
 	return app.main(argc, argv);
 }

@@ -58,6 +58,13 @@ int main(int argc, char** argv)
 		test::compare(out, std::string_view(R"({"jsonrpc":"2.0","id":1,"method":"foo"})"));
 	});
 
+	app.addTest("Request/EmptyMethodIsPreserved", [](){
+		const auto out = build({}, [](json::Writer& writer){
+			auto rw = RequestWriter::writeRequest(writer.beginObject(), MessageId(json::Integer(1)), "");
+		});
+		test::compare(out, std::string_view(R"({"jsonrpc":"2.0","id":1,"method":""})"));
+	});
+
 	app.addTest("Request/StringId", [](){
 		const auto out = build({}, [](json::Writer& writer){
 			auto rw = RequestWriter::writeRequest(writer.beginObject(), MessageId(json::String("abc")), "foo");
