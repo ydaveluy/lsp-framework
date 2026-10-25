@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -58,7 +59,9 @@ int main(int argc, char** argv)
 	});
 
 	app.addTest("RequestResult::TaskConstruction", [](){
-		auto result = taskResult(TaskFunction<std::unique_ptr<int>>([]{ return std::make_unique<int>(55); }));
+		auto values = std::array<int, 64>();
+		values.fill(55);
+		auto result = taskResult(TaskFunction<std::unique_ptr<int>>([values]{ return std::make_unique<int>(values.back()); }));
 		test::check(result.isDeferred(), "isDeferred");
 		test::check(result.isReady(), "readyImmediately");
 		test::check(result.wait(0), "waitTimed");

@@ -161,7 +161,11 @@ private:
 
 		void moveTo(void* mem) noexcept override
 		{
-			new(mem) Impl(std::move(*this));
+			// Heap-allocated tasks transfer their pointer instead of moving here.
+			if constexpr(sizeof(Impl) <= StorageSize)
+				new(mem) Impl(std::move(*this));
+			else
+				assert(false && "Heap-allocated tasks cannot move into inline storage");
 		}
 	};
 

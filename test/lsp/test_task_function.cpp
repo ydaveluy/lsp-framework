@@ -102,7 +102,9 @@ int main(int argc, char** argv)
 			return sum;
 		});
 
-		test::compare(std::move(task).run(), 128);
+		auto moved = std::move(task);
+		test::check(!task, "sourceEmpty");
+		test::compare(std::move(moved).run(), 128);
 	});
 
 	app.addTest("TaskFunction/EmptyIsFalsy", [](){
