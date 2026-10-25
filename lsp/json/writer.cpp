@@ -21,7 +21,7 @@ void appendStringLiteral(std::string_view str, std::string& out)
 			continue;
 
 		if(segment != it)
-			out.append(segment, static_cast<std::size_t>(it - segment));
+			out.append(segment, it);
 
 		switch(c)
 		{
@@ -81,7 +81,7 @@ void appendStringLiteral(std::string_view str, std::string& out)
 	}
 
 	if(segment != end)
-		out.append(segment, static_cast<std::size_t>(end - segment));
+		out.append(segment, end);
 
 	out += '\"';
 }

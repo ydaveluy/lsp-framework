@@ -53,20 +53,25 @@ endif()
 
 # lspgen
 
-add_executable(lspgen
-	lsp/json/json.cpp
-	lsp/json/parser.cpp
-	lsp/json/writer.cpp
-	lspgen/endpoint_generator.cpp
-	lspgen/generator.cpp
-	lspgen/message_generator.cpp
-	lspgen/protocol_version_generator.cpp
-	lspgen/type_generator.cpp
-	lspgen/cpp_writer.cpp
-	lspgen/lspgen.cpp
-	lspgen/meta_model.cpp
-)
-target_include_directories(lspgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(CMAKE_CROSSCOMPILING)
+	# The parent supplies the native generator through IMPORTED_LOCATION.
+	add_executable(lspgen IMPORTED GLOBAL)
+else()
+	add_executable(lspgen
+		lsp/json/json.cpp
+		lsp/json/parser.cpp
+		lsp/json/writer.cpp
+		lspgen/endpoint_generator.cpp
+		lspgen/generator.cpp
+		lspgen/message_generator.cpp
+		lspgen/protocol_version_generator.cpp
+		lspgen/type_generator.cpp
+		lspgen/cpp_writer.cpp
+		lspgen/lspgen.cpp
+		lspgen/meta_model.cpp
+	)
+	target_include_directories(lspgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
 
 # liblsp
 
