@@ -25,7 +25,8 @@ public:
 	TaskFunction(std::nullptr_t){}
 
 	template<typename F, typename... Args>
-	requires std::is_invocable_r_v<R, std::decay_t<F>, std::decay_t<Args>...> &&
+	requires (!std::same_as<std::decay_t<F>, TaskFunction>) &&
+					 std::is_invocable_r_v<R, std::decay_t<F>, std::decay_t<Args>...> &&
 					 std::is_nothrow_move_constructible_v<std::decay_t<F>> &&
 					 std::constructible_from<std::decay_t<F>, F&&> &&
 					 (std::is_nothrow_move_constructible_v<std::decay_t<Args>> && ...) &&

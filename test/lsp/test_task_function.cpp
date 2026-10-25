@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <test/test.h>
 #include <lsp/task_function.h>
@@ -164,6 +165,8 @@ int main(int argc, char** argv)
 	});
 
 	app.addTest("TaskFunction/ConstraintsRejectInvalidCallables", [](){
+		static_assert(std::is_nothrow_move_constructible_v<TaskFunction<int>>);
+		static_assert(!std::constructible_from<TaskFunction<int>, TaskFunction<int>&>);
 		static_assert(std::constructible_from<TaskFunction<int>, int(*)()>);
 		static_assert(std::constructible_from<TaskFunction<void>, int(*)()>);
 		static_assert(!std::constructible_from<TaskFunction<int>, int>);
