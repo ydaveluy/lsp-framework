@@ -71,11 +71,14 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 				{
 					writeJson(key, value, objectWriter);
 				}, *resultValue);
+			removeActive(ctx.id());
 		}
 		else
 		{
 			auto responseSender = m_connection.response(result.requestId());
 			responseSender.writeData(*resultValue);
+			// The client can reuse the id as soon as it reads the response
+			removeActive(ctx.id());
 			responseSender.submit();
 		}
 	}
@@ -102,8 +105,6 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {}, batchSender);
 		return;
 	}
-
-	removeActive(ctx.id());
 }
 
 /*

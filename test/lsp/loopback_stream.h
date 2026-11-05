@@ -17,6 +17,7 @@ namespace lsptest{
 class LoopbackStream : public lsp::io::Stream{
 public:
 	std::function<void()> onRead;
+	std::function<void()> onWrite;
 	int                   readCount = 0;
 
 	void read(char* buffer, std::size_t size) override
@@ -65,6 +66,9 @@ public:
 		}
 
 		m_dataAvailable.notify_all();
+
+		if(onWrite)
+			onWrite();
 	}
 
 	void close()

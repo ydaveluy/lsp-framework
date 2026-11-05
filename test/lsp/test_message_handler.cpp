@@ -920,6 +920,75 @@ int main(int argc, char** argv)
 		test::check(canceledAfter, "canceledAfterCancelCall");
 	});
 
+	// A client can reuse an id as soon as it reads the response.
+	app.addTest("Cancelation/RequestIsInactiveWhenItsResponseIsWritten", [](std::string_view body){
+		auto stream  = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		handler.on<TestNoParamsRequest>([]{ return std::vector<int>{}; });
+		handler.on<InvalidResultRequest>([]{ return InvalidResultRequest::Result{1u, std::numeric_limits<unsigned int>::max()}; });
+		handler.on<TestRequest>([](TestRequest::Params&&) -> int { throw std::runtime_error("failed"); });
+
+		const auto message = makeMessage(body);
+		stream.write(message.data(), message.size());
+
+		const auto id     = RequestId(json::Integer(7));
+		auto       writes = 0;
+		auto       active = false;
+		stream.onWrite = [&]{
+			++writes;
+			handler.cancel(id);
+			active = active || handler.isCanceled(id);
+		};
+
+		handler.processNextMessage();
+
+		test::check(writes > 0, "responseWritten");
+		test::check(!active, "inactiveWhenWritten");
+	})({
+		{"Single", {R"({"jsonrpc":"2.0","id":7,"method":"test/noParamsRequest"})"}},
+		{"Batch", {R"([{"jsonrpc":"2.0","id":7,"method":"test/noParamsRequest"}])"}},
+		{"HandlerFailure", {R"({"jsonrpc":"2.0","id":7,"method":"test/request","params":{}})"}},
+		{"InvalidResult", {R"({"jsonrpc":"2.0","id":7,"method":"test/invalidResult"})"}},
+	});
+
+	app.addTest("Cancelation/IdReusedWhileItsResponseIsWrittenCanBeCanceled", [](){
+		auto gate    = DeferredGate();
+		auto stream  = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+
+		handler.on<TestRequest>([](TestRequest::Params&&){ return 0; });
+		handler.on<TestNoParamsRequest>([&]() -> std::future<TestNoParamsRequest::Result>
+		{
+			return std::async(std::launch::deferred, [&]() -> std::vector<int>
+			{
+				gate.waitForRelease();
+				return std::vector<int>{};
+			});
+		});
+
+		const auto first  = makeMessage(R"({"jsonrpc":"2.0","id":7,"method":"test/request","params":{}})");
+		const auto second = makeMessage(R"({"jsonrpc":"2.0","id":7,"method":"test/noParamsRequest"})");
+		stream.write(first.data(), first.size());
+
+		auto writes = 0;
+		stream.onWrite = [&]{
+			if(++writes != 2) // The header, then the content
+				return;
+
+			stream.takeAll();
+			stream.write(second.data(), second.size());
+			auto reader = std::thread([&]{ handler.processNextMessage(); });
+			reader.join();
+		};
+
+		handler.processNextMessage();
+
+		const auto id = RequestId(json::Integer(7));
+		handler.cancel(id);
+		test::check(handler.isCanceled(id), "reusedIdIsActive");
+		gate.release();
+	});
+
 	app.addTest("Cancelation/StopTokenWakesAWaitingRequest", [](){
 		auto stream  = LoopbackStream();
 		auto handler = MessageHandler(Connection(stream));
