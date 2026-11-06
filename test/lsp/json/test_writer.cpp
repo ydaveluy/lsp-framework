@@ -506,5 +506,44 @@ int main(int argc, char** argv)
 		{"HighBeforeHigh", {R"("\uD800\uD800")"}},
 	});
 
+	app.addTest("String/WellFormedUtf8", [&build](std::string_view text){
+		const auto out = build({}, [text](Writer& writer){
+			writer.write(text);
+		});
+
+		test::compare(out, '"' + std::string(text) + '"');
+	})({
+		{"FirstTwoByte",    {"\xC2\x80"}},
+		{"LastTwoByte",     {"\xDF\xBF"}},
+		{"FirstThreeByte",  {"\xE0\xA0\x80"}},
+		{"BeforeSurrogate", {"\xED\x9F\xBF"}},
+		{"AfterSurrogate",  {"\xEE\x80\x80"}},
+		{"LastThreeByte",   {"\xEF\xBF\xBF"}},
+		{"FirstFourByte",   {"\xF0\x90\x80\x80"}},
+		{"LastFourByte",    {"\xF4\x8F\xBF\xBF"}},
+		{"Mixed",           {"a\xC3\xA9" "b\xE4\xB8\xAD" "c\xF0\x9F\x98\x80" "d"}},
+	});
+
+	// Each maximal ill-formed subpart becomes one U+FFFD (EF BF BD).
+	app.addTest("String/IllFormedUtf8", [&build](std::string_view text, std::string_view expected){
+		const auto out = build({}, [text](Writer& writer){
+			auto ow = writer.beginObject();
+			ow.write(text, text);
+		});
+
+		test::compare(out, "{\"" + std::string(expected) + "\":\"" + std::string(expected) + "\"}");
+	})({
+		{"LoneContinuation",    {"a\x80" "b",          "a\xEF\xBF\xBD" "b"}},
+		{"InvalidLeads",        {"\xC0\xC1\xF5\xFF",   "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD"}},
+		{"OverlongTwoByte",     {"\xC0\xAF",           "\xEF\xBF\xBD\xEF\xBF\xBD"}},
+		{"OverlongThreeByte",   {"\xE0\x80\xAF",       "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD"}},
+		{"AboveMaximum",        {"\xF4\x90\x80\x80",   "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD"}},
+		{"TruncatedAtEnd",      {"a\xE2\x82",          "a\xEF\xBF\xBD"}},
+		{"TruncatedBeforeText", {"\xF0\x9F\x98" "x",   "\xEF\xBF\xBD" "x"}},
+		{"TruncatedTwice",      {"\xE2\x82\xE2\x82",   "\xEF\xBF\xBD\xEF\xBF\xBD"}},
+		{"TruncatedSurrogate",  {"\xED\xA0",           "\xEF\xBF\xBD"}},
+		{"BeforeEscapes",       {"\x80\"\n\xC3",       "\xEF\xBF\xBD\\\"\\n\xEF\xBF\xBD"}},
+	});
+
 	return app.main(argc, argv);
 }

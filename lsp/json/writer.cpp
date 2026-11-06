@@ -1,11 +1,60 @@
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <utility>
 #include "writer.h"
 #include "json.h"
 
 namespace lsp::json{
 namespace{
+
+constexpr auto hexLookup = "0123456789ABCDEF";
+
+struct Utf8Sequence{
+	std::ptrdiff_t size;       // The whole sequence, or its maximal ill-formed subpart
+	bool           wellFormed;
+};
+
+/*
+ * Reads the UTF-8 sequence that starts at it with a byte of 0x80 or more.
+ * Surrogate code points (ED A0..BF xx) count as well formed: the parser
+ * stores lone \u escapes that way.
+ */
+auto readUtf8Sequence(std::string_view::iterator it, std::string_view::iterator end) -> Utf8Sequence
+{
+	// Past the end reads as 0, which is never a continuation byte.
+	const auto byteAt = [it, left = end - it](std::ptrdiff_t i) -> unsigned int{
+		return i < left ? static_cast<unsigned char>(it[i]) : 0u;
+	};
+	const auto isContinuation = [](unsigned int byte){ return (byte & 0xC0) == 0x80; };
+
+	const auto lead   = byteAt(0);
+	const auto second = byteAt(1);
+
+	if(lead >= 0xC2 && lead <= 0xDF)
+		return isContinuation(second) ? Utf8Sequence{2, true} : Utf8Sequence{1, false};
+
+	if(lead >= 0xE0 && lead <= 0xEF)
+	{
+		if(second < (lead == 0xE0 ? 0xA0u : 0x80u) || second > 0xBF)
+			return {1, false};
+
+		return isContinuation(byteAt(2)) ? Utf8Sequence{3, true} : Utf8Sequence{2, false};
+	}
+
+	if(lead >= 0xF0 && lead <= 0xF4)
+	{
+		if(second < (lead == 0xF0 ? 0x90u : 0x80u) || second > (lead == 0xF4 ? 0x8Fu : 0xBFu))
+			return {1, false};
+
+		if(!isContinuation(byteAt(2)))
+			return {2, false};
+
+		return isContinuation(byteAt(3)) ? Utf8Sequence{4, true} : Utf8Sequence{3, false};
+	}
+
+	return {1, false};
+}
 
 void appendStringLiteral(std::string_view str, std::string& out)
 {
@@ -17,8 +66,22 @@ void appendStringLiteral(std::string_view str, std::string& out)
 	for(auto it = segment; it != end; ++it)
 	{
 		const char c = *it;
-		if(static_cast<unsigned char>(c) >= 0x20 && c != '"' && c != '\\' && static_cast<unsigned char>(c) != 0xED)
+		const auto byte = static_cast<unsigned char>(c);
+		auto sequence = Utf8Sequence{1, false};
+
+		if(byte >= 0x80)
+		{
+			sequence = readUtf8Sequence(it, end);
+			if(sequence.wellFormed && (byte != 0xED || static_cast<unsigned char>(it[1]) < 0xA0))
+			{
+				it += sequence.size - 1;
+				continue;
+			}
+		}
+		else if(byte >= 0x20 && c != '"' && c != '\\')
+		{
 			continue;
+		}
 
 		if(segment != it)
 			out.append(segment, it);
@@ -46,37 +109,31 @@ void appendStringLiteral(std::string_view str, std::string& out)
 		case '\\':
 			out += "\\\\";
 			break;
-		case static_cast<char>(0xED):
-			if(end - it >= 3 &&
-				static_cast<unsigned char>(it[1]) >= 0xA0 &&
-				static_cast<unsigned char>(it[1]) <= 0xBF &&
-				(static_cast<unsigned char>(it[2]) & 0xC0) == 0x80)
+		default:
+			if(byte < 0x20)
 			{
+				out += "\\u00";
+				out += hexLookup[byte >> 4];
+				out += hexLookup[byte & 0xF];
+			}
+			else if(sequence.wellFormed)
+			{
+				// A surrogate code point has no UTF-8 form: write it as an escape.
 				const auto codepoint = 0xD000u | ((static_cast<unsigned char>(it[1]) & 0x3Fu) << 6) |
 					(static_cast<unsigned char>(it[2]) & 0x3Fu);
-				constexpr auto hexLookup = "0123456789ABCDEF";
 				out += "\\u";
 				out += hexLookup[(codepoint >> 12) & 0xF];
 				out += hexLookup[(codepoint >> 8) & 0xF];
 				out += hexLookup[(codepoint >> 4) & 0xF];
 				out += hexLookup[codepoint & 0xF];
-				it += 2;
-				break;
-			}
-			[[fallthrough]];
-		default:
-			if(static_cast<unsigned char>(c) < 0x20)
-			{
-				constexpr auto hexLookup = "0123456789ABCDEF";
-				out += "\\u00";
-				out += hexLookup[c >> 4];
-				out += hexLookup[c & 0xF];
 			}
 			else
 			{
-				out += c;
+				// JSON text is UTF-8: each maximal ill-formed subpart becomes U+FFFD.
+				out += "\xEF\xBF\xBD";
 			}
 		}
+		it += sequence.size - 1;
 		segment = it + 1;
 	}
 
