@@ -17,6 +17,7 @@
 #include <vector>
 #include <test/test.h>
 #include "loopback_stream.h"
+#include "thread_start_failure.h"
 #include <lsp/json/json.h>
 #include <lsp/message_handler.h>
 
@@ -535,6 +536,51 @@ int main(int argc, char** argv)
 		test::compare(response.object().get("id").integer(), 1);
 		test::check(response.object().contains("result"), "hasResult");
 	});
+
+#ifdef LSP_TEST_THREAD_START_FAILURE
+	app.addTest("Async/NoThreadAnswersOnce", [](){
+		// No response thread can start: the request is answered with an error
+		// once, and its response is never computed later by another thread.
+		auto stream  = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto runs    = std::atomic<int>(0);
+
+		handler.on<TestNoParamsRequest>([&]() -> TaskFunction<TestNoParamsRequest::Result>
+		{
+			return TaskFunction<TestNoParamsRequest::Result>([&]() -> std::vector<int>
+			{
+				++runs;
+				return std::vector<int>{1};
+			});
+		});
+
+		auto refused = handler.sendRequest<TestNoParamsRequest>();
+
+		{
+			const auto failure = lsptest::ThreadStartFailure();
+			handler.processNextMessage();
+		}
+
+		handler.processNextMessage();
+
+		try
+		{
+			getResult(refused);
+			test::fail("Expected ResponseError to be thrown");
+		}
+		catch(const ResponseError& e)
+		{
+			test::compare(e.code(), static_cast<int>(MessageError::InternalError));
+		}
+
+		auto served = handler.sendRequest<TestNoParamsRequest>();
+		handler.processNextMessage();
+		handler.processNextMessage();
+
+		test::compare(getResult(served), std::vector<int>{1});
+		test::compare(runs.load(), 1);
+	});
+#endif
 
 	app.addTest("Async/ResponseToClosedConnection", [](){
 		// The peer is gone when the response is written: the request is not

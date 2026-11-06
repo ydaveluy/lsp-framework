@@ -6,13 +6,23 @@ namespace lsp{
 ThreadPool::ThreadPool(unsigned int initialThreads, unsigned int maxThreads)
 	: m_maxThreads(std::max(maxThreads, 1u))
 {
-	const auto lock = std::lock_guard(m_mutex);
-	initialThreads = std::min(initialThreads, m_maxThreads);
-	m_threads.reserve(initialThreads);
-	m_waitForNewTasks = true;
+	try
+	{
+		const auto lock = std::lock_guard(m_mutex);
+		initialThreads = std::min(initialThreads, m_maxThreads);
+		m_threads.reserve(initialThreads);
+		m_waitForNewTasks = true;
 
-	for(std::size_t i = 0; i < initialThreads; ++i)
-		addThread();
+		for(std::size_t i = 0; i < initialThreads; ++i)
+			addThread();
+	}
+	catch(...)
+	{
+		// No destructor runs after a throwing constructor: join the threads that
+		// did start, or destroying them would end the process.
+		waitUntilFinished();
+		throw;
+	}
 }
 
 ThreadPool::~ThreadPool()
@@ -58,12 +68,24 @@ void ThreadPool::addTask(Task task)
 	if(!m_waitForNewTasks)
 		m_event.wait(lock, [this](){ return m_waitForNewTasks; });
 
-	m_taskQueue.emplace(std::move(task));
-
 	// Only an idle worker would pick the task up now: without one it would wait
-	// behind a running task, so grow instead.
-	if(m_taskQueue.size() > m_idleThreads && m_threads.size() < m_maxThreads)
-		addThread();
+	// behind a running task, so grow instead. A thread that cannot start leaves
+	// the task to the running ones, as when the pool is full. With none running,
+	// no thread would ever run it: the failure is thrown and the task not queued.
+	if(m_taskQueue.size() >= m_idleThreads && m_threads.size() < m_maxThreads)
+	{
+		try
+		{
+			addThread();
+		}
+		catch(...)
+		{
+			if(m_threads.empty())
+				throw;
+		}
+	}
+
+	m_taskQueue.emplace(std::move(task));
 
 	lock.unlock();
 	m_event.notify_one();

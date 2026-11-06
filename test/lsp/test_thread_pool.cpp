@@ -2,9 +2,11 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <system_error>
 #include <thread>
 #include <test/test.h>
 #include <lsp/thread_pool.h>
+#include "thread_start_failure.h"
 
 using namespace lsp;
 
@@ -187,6 +189,57 @@ int main(int argc, char** argv)
 		pool.waitUntilFinished();
 		test::check(ran.load(), "realTaskRan");
 	});
+
+#ifdef LSP_TEST_THREAD_START_FAILURE
+	app.addTest("ThreadPool/TaskNoThreadCanRunIsRefused", [](){
+		auto pool     = ThreadPool(0, 2);
+		auto runs     = std::atomic<int>(0);
+		auto captured = std::make_shared<int>(0);
+		auto watch    = std::weak_ptr<int>(captured);
+
+		{
+			const auto failure = lsptest::ThreadStartFailure();
+			test::expectException<std::system_error>([&]{
+				pool.addTask([&runs, captured = std::move(captured)]{ ++runs; });
+			});
+		}
+
+		test::check(watch.expired(), "refusedTaskReleased");
+
+		pool.addTask([&]{ runs += 10; });
+		pool.waitUntilFinished();
+		test::compare(runs.load(), 10);
+	});
+
+	app.addTest("ThreadPool/FailedGrowthLeavesTaskToRunningWorker", [](){
+		auto pool    = ThreadPool(0, 2);
+		auto started = std::promise<void>();
+		auto release = std::promise<void>();
+		auto runs    = std::atomic<int>(0);
+
+		pool.addTask([&, released = release.get_future()]{
+			started.set_value();
+			(void)released.wait_for(std::chrono::seconds(2));
+		});
+		started.get_future().wait();
+
+		{
+			const auto failure = lsptest::ThreadStartFailure();
+			pool.addTask([&]{ ++runs; });
+		}
+
+		release.set_value();
+		pool.waitUntilFinished();
+		test::compare(runs.load(), 1);
+	});
+
+	app.addTest("ThreadPool/FailedInitialThreadJoinsStartedOnes", [](){
+		const auto failure = lsptest::ThreadStartFailure(1);
+		test::expectException<std::system_error>([]{
+			auto pool = ThreadPool(3, 3);
+		});
+	});
+#endif
 
 	return app.main(argc, argv);
 }

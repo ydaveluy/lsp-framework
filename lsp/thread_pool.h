@@ -16,6 +16,7 @@ public:
 	ThreadPool(unsigned int initialThreads = 0, unsigned int maxThreads = std::thread::hardware_concurrency());
 	~ThreadPool();
 
+	// Throws, and drops the task unrun, when no thread can be started to run it.
 	void addTask(Task task);
 	void waitUntilFinished();
 	void setMaxThreads(unsigned int maxThreads);
