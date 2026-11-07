@@ -221,7 +221,7 @@ if (LSP_INSTALL)
 endif()
 
 if(WIN32)
-	target_link_libraries(lsp PUBLIC Ws2_32)
+	target_link_libraries(lsp PUBLIC ws2_32)
 endif()
 
 if(LSP_BUILD_EXAMPLES)
