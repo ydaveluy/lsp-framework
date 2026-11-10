@@ -114,19 +114,6 @@ BatchWriter::BatchWriter(json::ArrayWriter&& writer)
 {
 }
 
-auto BatchWriter::checkpoint() const -> Checkpoint
-{
-	return {m_writer.m_writer->m_text.size(), m_writer.m_writer->m_nestingLevel, m_writer.m_first, m_empty};
-}
-
-void BatchWriter::rollback(Checkpoint checkpoint)
-{
-	m_writer.m_writer->m_text.resize(checkpoint.size);
-	m_writer.m_writer->m_nestingLevel = checkpoint.nestingLevel;
-	m_writer.m_first = checkpoint.first;
-	m_empty = checkpoint.empty;
-}
-
 void BatchWriter::finalize()
 {
 	m_writer.finalize();

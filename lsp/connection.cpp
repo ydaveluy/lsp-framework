@@ -155,11 +155,6 @@ Connection& Connection::operator=(Connection&&) noexcept = default;
 
 auto Connection::readMessage() -> Connection::Message
 {
-	return readMessage(nullptr);
-}
-
-auto Connection::readMessage(std::vector<jsonrpc::Error>* invalidBatch) -> Connection::Message
-{
 	for(;;) // Keep trying until a message was read or an unrecoverable error happened
 	{
 		try
@@ -190,28 +185,7 @@ auto Connection::readMessage(std::vector<jsonrpc::Error>* invalidBatch) -> Conne
 			if(!json.isArray())
 				throw jsonrpc::ProtocolError("Message must be a json object or array");
 
-			if(!invalidBatch || json.array().empty())
-				return jsonrpc::messageBatchFromJson(std::move(json.array()));
-
-			auto batch = jsonrpc::MessageBatch();
-			batch.reserve(json.array().size());
-
-			for(auto& entry : json.array())
-			{
-				try
-				{
-					if(!entry.isObject())
-						throw jsonrpc::ProtocolError("Message batch entry must be an object");
-
-					batch.push_back(jsonrpc::messageFromJson(std::move(entry.object())));
-				}
-				catch(const jsonrpc::ProtocolError& e)
-				{
-					invalidBatch->push_back({jsonrpc::Error::InvalidRequest, e.what()});
-				}
-			}
-
-			return batch;
+			return jsonrpc::messageBatchFromJson(std::move(json.array()));
 		}
 		catch(const json::ParseError& e)
 		{

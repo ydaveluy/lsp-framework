@@ -6,8 +6,6 @@
 #include <string>
 #include <string_view>
 
-namespace lsp::jsonrpc{ class BatchWriter; }
-
 namespace lsp::json{
 
 class ObjectWriter;
@@ -21,7 +19,6 @@ using Array = std::vector<Value>;
  */
 
 class Writer{
-	friend class lsp::jsonrpc::BatchWriter;
 	friend class ObjectWriter;
 	friend class ArrayWriter;
 public:
@@ -138,7 +135,6 @@ private:
  */
 
 class ArrayWriter{
-	friend class lsp::jsonrpc::BatchWriter;
 	friend class Writer;
 public:
 	~ArrayWriter();

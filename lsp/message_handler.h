@@ -187,7 +187,7 @@ public:
 private:
 	class PendingRequestBase;
 	using PendingRequestPtr = std::unique_ptr<PendingRequestBase>;
-	using HandlerWrapper    = std::function<void(json::Value&&, Connection::BatchSender*)>;
+	using HandlerWrapper    = std::function<void(json::Value&&)>;
 
 	struct ActiveRequest{
 		RequestId        id;
@@ -225,9 +225,9 @@ private:
 	void deferNotification(T&& result);
 
 	template<typename M>
-	void sendResponse(RequestResult<typename M::Result>& result, Connection::BatchSender* batchSender);
+	void sendResponse(RequestResult<typename M::Result>& result);
 
-	void processRequest(jsonrpc::Request&& request, Connection::BatchSender* batchSender);
+	void processRequest(jsonrpc::Request&& request);
 	void processResponse(jsonrpc::Response&& response);
 	void addHandler(MessageKind kind, std::string_view method, HandlerWrapper&& handlerFunc);
 	void removePendingRequest(const RequestId& id);
@@ -238,8 +238,7 @@ private:
 		const RequestId& requestId,
 		int errorCode,
 		std::string_view errorMessage,
-		const std::optional<json::Value>& errorData,
-		Connection::BatchSender* batchSender);
+		const std::optional<json::Value>& errorData);
 
 	static auto nextUniqueRequestId() -> json::Integer;
 

@@ -64,57 +64,45 @@ MessageHandler::MessageHandler(Connection connection, unsigned int maxResponseTh
 
 MessageHandler::~MessageHandler()
 {
-	// Joining the response threads waits for every request still computing:
-	// stopping them first lets a request that observes its token end early.
-	auto sources = std::vector<std::stop_source>();
-
+	// Stops every request before the pool joins them, so they can end early.
+	// Each source is stopped outside the lock and stays listed for queued
+	// requests; nothing here allocates.
+	for(;;)
 	{
-		const auto lock = std::lock_guard(m_activeRequestMutex);
-		sources.reserve(m_activeRequests.size());
+		auto source = std::stop_source(std::nostopstate);
 
-		for(const auto& request : m_activeRequests)
-			sources.push_back(request.source);
-	}
+		{
+			const auto lock = std::lock_guard(m_activeRequestMutex);
+			const auto it   = std::ranges::find_if(m_activeRequests, [](const auto& r){ return !r.source.stop_requested(); });
 
-	for(auto& source : sources)
+			if(it == m_activeRequests.end())
+				break;
+
+			source = it->source;
+		}
+
 		source.request_stop();
+	}
 }
 
 void MessageHandler::processNextMessage()
 {
-	auto invalidBatch = std::vector<jsonrpc::Error>();
-	auto messageOrBatch = m_connection.readMessage(&invalidBatch);
+	auto messageOrBatch = m_connection.readMessage();
+	auto* const message = std::get_if<jsonrpc::Message>(&messageOrBatch);
 
-	if(auto* const message = std::get_if<jsonrpc::Message>(&messageOrBatch))
+	// A batch gets one error and none of its entries runs: language clients
+	// do not send batches.
+	if(!message)
 	{
-		if(auto* const request = std::get_if<jsonrpc::Request>(message))
-			processRequest(std::move(*request), nullptr);
-		else
-			processResponse(std::move(std::get<jsonrpc::Response>(*message)));
+		auto errorResponse = m_connection.errorResponse(json::Null(), MessageError::InvalidRequest, "Batches are not supported");
+		errorResponse.submit();
+		return;
 	}
+
+	if(auto* const request = std::get_if<jsonrpc::Request>(message))
+		processRequest(std::move(*request));
 	else
-	{
-		auto& batch       = std::get<jsonrpc::MessageBatch>(messageOrBatch);
-		auto  batchSender = m_connection.messageBatch();
-
-		for(const auto& error : invalidBatch)
-		{
-			auto writer = batchSender.writeError(json::Null(), error.code, error.message);
-		}
-
-		for(auto& msg : batch)
-		{
-			if(auto* const request = std::get_if<jsonrpc::Request>(&msg))
-				processRequest(std::move(*request), &batchSender);
-			else
-				processResponse(std::move(std::get<jsonrpc::Response>(msg)));
-		}
-
-		if(batchSender.batchIsEmpty())
-			batchSender.discard();
-		else
-			batchSender.submit();
-	}
+		processResponse(std::move(std::get<jsonrpc::Response>(*message)));
 }
 
 void MessageHandler::setConnection(Connection connection)
@@ -205,7 +193,7 @@ void MessageHandler::dispatchMessageLog(const MessageLog& msgLog)
 		(*callback)(msgLog);
 }
 
-void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::BatchSender* batchSender)
+void MessageHandler::processRequest(jsonrpc::Request&& request)
 {
 	const auto requestTimestamp = std::chrono::steady_clock::now();
 
@@ -240,9 +228,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 		{
 			if(request.isNotification())
 			{
-				(*handler)(
-					request.params.has_value() ? std::move(*request.params) : json::Null{},
-					nullptr);
+				(*handler)(request.params.has_value() ? std::move(*request.params) : json::Null{});
 			}
 			else
 			{
@@ -250,9 +236,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 				// Instantiate request context for request handler
 				auto context = RequestContext(*this, request.method, *request.id, requestTimestamp);
 
-				(*handler)(
-					request.params.has_value() ? std::move(*request.params) : json::Null{},
-					batchSender);
+				(*handler)(request.params.has_value() ? std::move(*request.params) : json::Null{});
 			}
 		}
 		catch(const ConnectionError&)
@@ -271,7 +255,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 					*request.id,
 					e.code(),
 					e.what(),
-					e.data(), batchSender);
+					e.data());
 			}
 		}
 		catch(const std::exception& e)
@@ -285,8 +269,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 					*request.id,
 					MessageError::InternalError,
 					e.what(),
-					{},
-					batchSender);
+					{});
 			}
 		}
 	}
@@ -300,8 +283,7 @@ void MessageHandler::processRequest(jsonrpc::Request&& request, Connection::Batc
 				*request.id,
 				MessageError::MethodNotFound,
 				"Method not found",
-				{},
-				batchSender);
+				{});
 		}
 	}
 }
@@ -441,8 +423,7 @@ void MessageHandler::sendErrorResponse(
 	const RequestId& requestId,
 	int errorCode,
 	std::string_view errorMessage,
-	const std::optional<json::Value>& errorData,
-	Connection::BatchSender* batchSender)
+	const std::optional<json::Value>& errorData)
 {
 	if(shouldLog())
 	{
@@ -460,28 +441,12 @@ void MessageHandler::sendErrorResponse(
 			dispatchMessageLog(msgLog);
 	}
 
-	if(batchSender)
-	{
-		auto responseWriter = batchSender->writeError(requestId, errorCode, errorMessage);
+	auto errorResponse = m_connection.errorResponse(requestId, errorCode, errorMessage);
 
-		if(errorData.has_value())
-		{
-			responseWriter.writeData(
-				[](std::string_view key, const json::Value& value, json::ObjectWriter& objectWriter)
-				{
-					objectWriter.write(key, value);
-				}, *errorData);
-		}
-	}
-	else
-	{
-		auto errorResponse = m_connection.errorResponse(requestId, errorCode, errorMessage);
+	if(errorData.has_value())
+		errorResponse.writeData(*errorData);
 
-		if(errorData.has_value())
-			errorResponse.writeData(*errorData);
-
-		errorResponse.submit();
-	}
+	errorResponse.submit();
 }
 
 auto MessageHandler::nextUniqueRequestId() -> json::Integer

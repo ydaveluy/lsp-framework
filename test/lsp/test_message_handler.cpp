@@ -1,11 +1,13 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <stop_token>
@@ -23,6 +25,35 @@
 
 using namespace lsp;
 using lsptest::LoopbackStream;
+
+namespace{
+
+// While set, counts the allocations made by the current thread.
+thread_local auto t_countAllocations = false;
+thread_local auto t_allocations      = 0;
+
+} // namespace
+
+void* operator new(std::size_t size)
+{
+	if(t_countAllocations)
+		++t_allocations;
+
+	if(auto* const memory = std::malloc(size == 0 ? 1 : size))
+		return memory;
+
+	throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept
+{
+	std::free(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept
+{
+	std::free(memory);
+}
 
 struct TestRequest{
 	static constexpr auto Method = std::string_view("test/request");
@@ -992,7 +1023,6 @@ int main(int argc, char** argv)
 		test::check(!active, "inactiveWhenWritten");
 	})({
 		{"Single", {R"({"jsonrpc":"2.0","id":7,"method":"test/noParamsRequest"})"}},
-		{"Batch", {R"([{"jsonrpc":"2.0","id":7,"method":"test/noParamsRequest"}])"}},
 		{"HandlerFailure", {R"({"jsonrpc":"2.0","id":7,"method":"test/request","params":{}})"}},
 		{"InvalidResult", {R"({"jsonrpc":"2.0","id":7,"method":"test/invalidResult"})"}},
 	});
@@ -1067,15 +1097,20 @@ int main(int argc, char** argv)
 		expectResponseError(response, MessageError::RequestCancelled, "Canceled");
 	});
 
+	// Destruction stops the running requests and the queued ones before
+	// joining them, and allocates nothing while doing so.
 	app.addTest("Cancelation/DestructionStopsRequestsInFlight", [](){
-		auto stream  = LoopbackStream();
-		auto started = std::promise<void>();
-		auto stopped = std::atomic<bool>(false);
+		auto stream         = LoopbackStream();
+		auto started        = std::promise<void>();
+		auto runningStopped = std::atomic<bool>(false);
+		auto queuedStopped  = std::atomic<bool>(false);
+		auto allocations    = -1;
 
 		{
-			auto handler = MessageHandler(Connection(stream));
+			// One response thread: the second request waits behind the first.
+			auto handler = std::optional<MessageHandler>(std::in_place, Connection(stream), 1u);
 
-			handler.on<TestNoParamsRequest>([&]() -> TaskFunction<TestNoParamsRequest::Result>
+			handler->on<TestNoParamsRequest>([&]() -> TaskFunction<TestNoParamsRequest::Result>
 			{
 				return TaskFunction<TestNoParamsRequest::Result>([&]() -> std::vector<int>
 				{
@@ -1085,18 +1120,39 @@ int main(int argc, char** argv)
 					auto lock  = std::unique_lock(mutex);
 					started.set_value();
 					event.wait_for(lock, token, std::chrono::seconds(5), []{ return false; });
-					stopped = token.stop_requested();
+					runningStopped = token.stop_requested();
 					return std::vector<int>{};
 				});
 			});
 
-			const auto request = makeMessage(R"({"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"})");
-			stream.write(request.data(), request.size());
-			handler.processNextMessage();
+			handler->on<TestRequest>([&](TestRequest::Params&&) -> TaskFunction<TestRequest::Result>
+			{
+				return TaskFunction<TestRequest::Result>([&]
+				{
+					queuedStopped = MessageHandler::RequestContext::get().stopToken().stop_requested();
+					return 0;
+				});
+			});
+
+			const auto running = makeMessage(R"({"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"})");
+			stream.write(running.data(), running.size());
+			handler->processNextMessage();
 			test::check(started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready, "started");
+
+			const auto queued = makeMessage(R"({"jsonrpc":"2.0","id":2,"method":"test/request","params":{}})");
+			stream.write(queued.data(), queued.size());
+			handler->processNextMessage();
+
+			t_allocations      = 0;
+			t_countAllocations = true;
+			handler.reset();
+			t_countAllocations = false;
+			allocations        = t_allocations;
 		}
 
-		test::check(stopped.load(), "stoppedByDestruction");
+		test::check(runningStopped.load(), "runningStoppedByDestruction");
+		test::check(queuedStopped.load(), "queuedStoppedByDestruction");
+		test::compare(allocations, 0);
 	});
 
 	app.addTest("Cancelation/ThrowIfCanceledIsNoOpWhenNotCanceled", [](){
@@ -1755,50 +1811,44 @@ int main(int argc, char** argv)
 		test::compare(getResult(responseB), 2);
 	});
 
-	app.addTest("Batch", [](){
-		auto stream              = LoopbackStream();
-		auto handler             = MessageHandler(Connection(stream));
-		auto requestCalled       = false;
-		auto paramsRequestCalled = false;
-		auto notificationCalled  = false;
+	// A batch gets one "Invalid Request" error with a null id, and none of its
+	// entries runs. The message after it is read as usual.
+	app.addTest("Batch/IsRefused", [](std::string_view batch){
+		auto stream  = LoopbackStream();
+		auto handler = MessageHandler(Connection(stream));
+		auto ran     = 0;
+		auto next    = false;
 
-		handler.on<TestNoParamsRequest>([&]()
-		{
-			requestCalled = true;
-			return std::vector<int>{1, 2, 3};
-		});
+		handler.on<TestNoParamsRequest>([&]{ ++ran; return std::vector<int>{}; });
+		handler.on<TestNotification>([&](std::vector<int>){ ++ran; });
+		handler.on<TestNoParamsNotification>([&]{ next = true; });
 
-		handler.on<TestRequest>([&](std::unordered_map<std::string, int> params)
-		{
-			paramsRequestCalled = true;
-			return params.at("x") * 2;
-		});
+		const auto messages = makeMessage(batch) + makeMessage(R"({"jsonrpc":"2.0","method":"test/noParamsNotification"})");
+		stream.write(messages.data(), messages.size());
 
-		handler.on<TestNoParamsNotification>([&]()
-		{
-			notificationCalled = true;
-		});
+		for(auto i = 0; i < 2 && !next; ++i)
+			handler.processNextMessage();
 
-		const auto batchBody = std::string(
-			R"([{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},)"
-			R"({"jsonrpc":"2.0","method":"test/noParamsNotification"},)"
-			R"({"jsonrpc":"2.0","id":2,"method":"test/request","params":{"x":5}}])");
-		const auto message = makeMessage(batchBody);
-		stream.write(message.data(), message.size());
+		test::check(next, "nextMessageRead");
+		test::compare(ran, 0);
 
-		handler.processNextMessage(); // The whole batch arrives as a single message
+		const auto output  = stream.takeAll();
+		auto       answers = 0;
 
-		test::check(requestCalled, "requestCalled");
-		test::check(paramsRequestCalled, "paramsRequestCalled");
-		test::check(notificationCalled, "notificationCalled");
+		for(auto at = output.find("Content-Length"); at != std::string::npos; at = output.find("Content-Length", at + 1))
+			++answers;
 
-		const auto response = parseMessageBody(stream.takeAll());
-		test::check(response.isArray(), "isArray");
-		test::compare(response.array().size(), 2);
-		test::compare(response.array()[0].object().get("id").integer(), 1);
-		test::compare(response.array()[0].object().get("result").array().size(), 3);
-		test::compare(response.array()[1].object().get("id").integer(), 2);
-		test::compare(response.array()[1].object().get("result").integer(), 10);
+		test::compare(answers, 1);
+
+		const auto response = parseMessageBody(output);
+		test::check(response.isObject(), "singleResponse");
+		test::check(response.object().get("id").isNull(), "nullId");
+		test::compare(response.object().get("error").object().get("code").integer(), MessageError::InvalidRequest);
+	})({
+		{"Requests", {R"([{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},{"jsonrpc":"2.0","method":"test/notification","params":[1]}])"}},
+		{"Notifications", {R"([{"jsonrpc":"2.0","method":"test/notification","params":[1]}])"}},
+		{"InvalidEntries", {R"([1,{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},{"bad":"entry"}])"}},
+		{"Empty", {R"([])"}},
 	});
 
 	app.addTest("Registration/HandlerCanRemoveAndReplaceItself", [](){
@@ -1943,43 +1993,6 @@ int main(int argc, char** argv)
 		test::check(stream.empty(), "noResponse");
 	})({{"WithParams", {true}}, {"NoParams", {false}}});
 
-	app.addTest("Batch/InvalidEntriesAndUnknownMethodsShareResponseArray", [](){
-		auto stream = LoopbackStream();
-		auto handler = MessageHandler(Connection(stream));
-		handler.on<TestNoParamsRequest>([]{ return std::vector<int>{42}; });
-		const auto message = makeMessage(R"([1,{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},{"jsonrpc":"2.0","id":2,"method":"unknown"},{"bad":"entry"}])");
-		stream.write(message.data(), message.size());
-		handler.processNextMessage();
-		const auto response = parseMessageBody(stream.takeAll());
-		test::check(response.isArray(), "singleBatchResponse");
-		test::compare(response.array().size(), 4);
-		auto invalid = 0;
-		auto successful = 0;
-		auto unknown = 0;
-		for(const auto& entry : response.array())
-		{
-			const auto& object = entry.object();
-			if(object.get("id").isNull())
-			{
-				test::compare(object.get("error").object().get("code").integer(), MessageError::InvalidRequest);
-				++invalid;
-			}
-			else if(object.get("id").integer() == 1)
-			{
-				test::compare(object.get("result").array().front().integer(), 42);
-				++successful;
-			}
-			else
-			{
-				test::compare(object.get("error").object().get("code").integer(), MessageError::MethodNotFound);
-				++unknown;
-			}
-		}
-		test::compare(invalid, 2);
-		test::compare(successful, 1);
-		test::compare(unknown, 1);
-	});
-
 	app.addTest("Error/InvalidResultSerialization", [](bool deferred){
 		auto stream = LoopbackStream();
 		auto handler = MessageHandler(Connection(stream));
@@ -1993,21 +2006,6 @@ int main(int argc, char** argv)
 		handler.processNextMessage();
 		expectResponseError(response, MessageError::InternalError, "LSP uinteger is outside the expected range");
 	})({{"Synchronous", {false}}, {"Deferred", {true}}});
-
-	app.addTest("Batch/InvalidResultSerializationRollsBackItsPartialResponse", [](){
-		auto stream = LoopbackStream();
-		auto handler = MessageHandler(Connection(stream));
-		handler.on<InvalidResultRequest>([]{ return InvalidResultRequest::Result{1u, std::numeric_limits<unsigned int>::max()}; });
-		handler.on<TestNoParamsRequest>([]{ return std::vector<int>{42}; });
-		const auto message = makeMessage(R"([{"jsonrpc":"2.0","id":1,"method":"test/noParamsRequest"},{"jsonrpc":"2.0","id":2,"method":"test/invalidResult"},{"jsonrpc":"2.0","id":3,"method":"test/noParamsRequest"}])");
-		stream.write(message.data(), message.size());
-		handler.processNextMessage();
-		const auto response = parseMessageBody(stream.takeAll());
-		test::compare(response.array().size(), 3);
-		test::compare(response.array()[0].object().get("result").array().front().integer(), 42);
-		test::compare(response.array()[1].object().get("error").object().get("code").integer(), MessageError::InternalError);
-		test::compare(response.array()[2].object().get("result").array().front().integer(), 42);
-	});
 
 	app.addTest("Registration/ReleasedCaptureCanRegisterAHandler", [](bool remove){
 		auto stream = LoopbackStream();

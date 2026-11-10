@@ -26,7 +26,7 @@ void MessageHandler::dispatchMessageLog(MessageLog& msgLog, const T& payload)
  */
 
 template<typename M>
-void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Connection::BatchSender* batchSender)
+void MessageHandler::sendResponse(RequestResult<typename M::Result>& result)
 {
 	const auto ctx         = RequestContext::get();
 	auto       resultValue = std::optional<typename M::Result>();
@@ -37,17 +37,15 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 	catch(const RequestError& e)
 	{
 		removeActive(ctx.id());
-		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), e.code(), e.what(), e.data(), batchSender);
+		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), e.code(), e.what(), e.data());
 		return;
 	}
 	catch(std::exception& e)
 	{
 		removeActive(ctx.id());
-		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {}, batchSender);
+		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {});
 		return;
 	}
-
-	const auto checkpoint = batchSender ? std::optional(batchSender->checkpoint()) : std::nullopt;
 
 	try
 	{
@@ -63,24 +61,11 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 			dispatchMessageLog(msgLog, *resultValue);
 		}
 
-		if(batchSender)
-		{
-			auto responseWriter = batchSender->writeResponse(ctx.id());
-			responseWriter.writeData(
-				[](std::string_view key, const typename M::Result& value, json::ObjectWriter& objectWriter)
-				{
-					writeJson(key, value, objectWriter);
-				}, *resultValue);
-			removeActive(ctx.id());
-		}
-		else
-		{
-			auto responseSender = m_connection.response(result.requestId());
-			responseSender.writeData(*resultValue);
-			// The client can reuse the id as soon as it reads the response
-			removeActive(ctx.id());
-			responseSender.submit();
-		}
+		auto responseSender = m_connection.response(result.requestId());
+		responseSender.writeData(*resultValue);
+		// The client can reuse the id as soon as it reads the response
+		removeActive(ctx.id());
+		responseSender.submit();
 	}
 	catch(const ConnectionError&)
 	{
@@ -89,20 +74,14 @@ void MessageHandler::sendResponse(RequestResult<typename M::Result>& result, Con
 	}
 	catch(const RequestError& e)
 	{
-		if(checkpoint)
-			batchSender->rollback(*checkpoint);
-
 		removeActive(ctx.id());
-		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), e.code(), e.what(), e.data(), batchSender);
+		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), e.code(), e.what(), e.data());
 		return;
 	}
 	catch(const std::exception& e)
 	{
-		if(checkpoint)
-			batchSender->rollback(*checkpoint);
-
 		removeActive(ctx.id());
-		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {}, batchSender);
+		sendErrorResponse(ctx.method(), ctx.timestamp(), ctx.id(), MessageError::InternalError, e.what(), {});
 		return;
 	}
 }
@@ -123,7 +102,7 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 {
 	addHandler(M::Kind, method,
 		[this, method = std::string(method), callback = std::forward<F>(callback)](
-			[[maybe_unused]] json::Value&& json, [[maybe_unused]] Connection::BatchSender* batchSender) mutable
+			[[maybe_unused]] json::Value&& json) mutable
 		{
 			const auto context = RequestContext::get();
 
@@ -161,10 +140,9 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 					}
 				}();
 
-			// Requests that are part of a batch cannot be handled asynchronously
-			if(!result.isDeferred() || batchSender)
+			if(!result.isDeferred())
 			{
-				sendResponse<M>(result, batchSender);
+				sendResponse<M>(result);
 			}
 			else
 			{
@@ -175,7 +153,7 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 
 						try
 						{
-							sendResponse<M>(result, nullptr);
+							sendResponse<M>(result);
 						}
 						catch(const ConnectionError&)
 						{
@@ -210,7 +188,7 @@ auto MessageHandler::onCustom(std::string_view method, F&& callback) -> MessageH
 {
 	addHandler(M::Kind, method,
 		[this, callback = std::forward<F>(callback)](
-			[[maybe_unused]] json::Value&& json, [[maybe_unused]] Connection::BatchSender* batchSender) mutable
+			[[maybe_unused]] json::Value&& json) mutable
 		{
 			(void)this; // Only used for async requests within if constexpr
 			static_assert(M::Kind == MessageKind::Notification);

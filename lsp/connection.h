@@ -3,7 +3,6 @@
 #include <memory>
 #include <string>
 #include <variant>
-#include <vector>
 #include <lsp/exception.h>
 #include <lsp/json/writer.h>
 #include <lsp/jsonrpc/jsonrpc.h>
@@ -125,8 +124,6 @@ public:
 	[[nodiscard]] auto messageBatch() -> BatchSender;
 
 private:
-	friend class MessageHandler;
-	auto readMessage(std::vector<jsonrpc::Error>* invalidBatch) -> Message;
 	struct Internal;
 	std::unique_ptr<Internal> m;
 
