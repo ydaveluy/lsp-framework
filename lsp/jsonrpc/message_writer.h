@@ -11,7 +11,7 @@ namespace lsp::jsonrpc{
 
 class RequestWriter{
 public:
-	void finalize();
+	void finalize() noexcept;
 
 	[[nodiscard]] static auto writeRequest(json::ObjectWriter&& writer, const MessageId& id, std::string_view method) -> RequestWriter;
 	[[nodiscard]] static auto writeNotification(json::ObjectWriter&& writer, std::string_view method) -> RequestWriter;
@@ -43,7 +43,7 @@ public:
 	ResponseWriter(const ResponseWriter&)            = delete;
 	ResponseWriter& operator=(const ResponseWriter&) = delete;
 
-	void finalize();
+	void finalize() noexcept;
 
 	[[nodiscard]] static auto writeResponse(json::ObjectWriter&& objectWriter, const MessageId& id) -> ResponseWriter;
 	[[nodiscard]] static auto writeError(json::ObjectWriter&& objectWriter, const MessageId& id, int code, std::string_view message) -> ResponseWriter;
@@ -76,7 +76,7 @@ class BatchWriter{
 public:
 	BatchWriter(json::ArrayWriter&& writer);
 
-	void finalize();
+	void finalize() noexcept;
 	bool batchIsEmpty() const;
 
 	[[nodiscard]] auto writeRequest(const MessageId& id, std::string_view method) -> RequestWriter;

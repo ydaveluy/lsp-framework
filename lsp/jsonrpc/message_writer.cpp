@@ -27,7 +27,7 @@ RequestWriter::RequestWriter(json::ObjectWriter&& writer, std::string_view metho
 	writeMessageBase(m_paramsWriter, id, method);
 }
 
-void RequestWriter::finalize()
+void RequestWriter::finalize() noexcept
 {
 	m_paramsWriter.finalize();
 }
@@ -75,10 +75,19 @@ auto ResponseWriter::operator=(ResponseWriter&& other) noexcept -> ResponseWrite
 	return *this;
 }
 
-void ResponseWriter::finalize()
+void ResponseWriter::finalize() noexcept
 {
 	if(!m_hasData && !m_errorWriter.has_value())
-		m_resultWriter.write("result", nullptr);
+	{
+		try
+		{
+			m_resultWriter.write("result", nullptr);
+		}
+		catch(...)
+		{
+			m_resultWriter.fail();
+		}
+	}
 
 	m_hasData = true;
 
@@ -114,7 +123,7 @@ BatchWriter::BatchWriter(json::ArrayWriter&& writer)
 {
 }
 
-void BatchWriter::finalize()
+void BatchWriter::finalize() noexcept
 {
 	m_writer.finalize();
 }

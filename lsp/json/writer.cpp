@@ -159,12 +159,24 @@ Writer::Writer(std::string_view indent)
 
 auto Writer::text() const& -> const std::string&
 {
+	if(m_failure)
+		std::rethrow_exception(m_failure);
+
 	return m_text;
 }
 
 auto Writer::text() && -> std::string
 {
+	if(m_failure)
+		std::rethrow_exception(m_failure);
+
 	return std::move(m_text);
+}
+
+void Writer::fail() noexcept
+{
+	if(!m_failure)
+		m_failure = std::current_exception();
 }
 
 void Writer::write(std::nullptr_t)
@@ -353,13 +365,27 @@ ObjectWriter& ObjectWriter::operator=(ObjectWriter&& other) noexcept
 	return *this;
 }
 
-void ObjectWriter::finalize()
+void ObjectWriter::finalize() noexcept
 {
 	if(m_writer)
 	{
-		m_writer->writeObjectEnd(!m_first);
+		try
+		{
+			m_writer->writeObjectEnd(!m_first);
+		}
+		catch(...)
+		{
+			m_writer->fail();
+		}
+
 		m_writer = nullptr;
 	}
+}
+
+void ObjectWriter::fail() noexcept
+{
+	if(m_writer)
+		m_writer->fail();
 }
 
 auto ObjectWriter::beginObject(std::string_view key) -> ObjectWriter
@@ -409,11 +435,19 @@ ArrayWriter& ArrayWriter::operator=(ArrayWriter&& other) noexcept
 	return *this;
 }
 
-void ArrayWriter::finalize()
+void ArrayWriter::finalize() noexcept
 {
 	if(m_writer)
 	{
-		m_writer->writeArrayEnd(!m_first);
+		try
+		{
+			m_writer->writeArrayEnd(!m_first);
+		}
+		catch(...)
+		{
+			m_writer->fail();
+		}
+
 		m_writer = nullptr;
 	}
 }

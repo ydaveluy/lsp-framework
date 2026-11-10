@@ -1,5 +1,6 @@
 #pragma once
 
+#include <exception>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -29,6 +30,8 @@ public:
 	Writer& operator=(const Writer&) = delete;
 	Writer& operator=(Writer&&)      = delete;
 
+	// The text written. A close that failed left it unfinished: reading it then
+	// rethrows that failure.
 	auto text() const& -> const std::string&;
 	auto text() && -> std::string;
 
@@ -58,6 +61,7 @@ public:
 
 private:
 	std::string            m_text;
+	std::exception_ptr     m_failure;
 	int                    m_nestingLevel = 0;
 	const std::string      m_indent;
 	const std::string_view m_keySep;
@@ -71,6 +75,7 @@ private:
 	void writeArrayStart();
 	void writeArrayEnd(bool hasItems);
 	void writeObjectKey(std::string_view key);
+	void fail() noexcept;
 };
 
 /*
@@ -103,7 +108,11 @@ public:
 	ObjectWriter(const ObjectWriter&)            = delete;
 	ObjectWriter& operator=(const ObjectWriter&) = delete;
 
-	void finalize();
+	// Closes the object; a close that fails leaves the text unfinished.
+	void finalize() noexcept;
+	// Leaves the text unfinished with the exception being handled, for a write
+	// that must not throw.
+	void fail() noexcept;
 
 	[[nodiscard]] auto beginObject(std::string_view key) -> ObjectWriter;
 	[[nodiscard]] auto beginArray(std::string_view key) -> ArrayWriter;
@@ -145,7 +154,8 @@ public:
 	ArrayWriter(const ArrayWriter&)            = delete;
 	ArrayWriter& operator=(const ArrayWriter&) = delete;
 
-	void finalize();
+	// Closes the array; a close that fails leaves the text unfinished.
+	void finalize() noexcept;
 
 	[[nodiscard]] auto beginObject() -> ObjectWriter;
 	[[nodiscard]] auto beginArray() -> ArrayWriter;

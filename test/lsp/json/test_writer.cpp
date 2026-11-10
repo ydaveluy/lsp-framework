@@ -1,11 +1,39 @@
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <new>
 #include <test/test.h>
 #include <lsp/json/json.h>
 #include <lsp/json/writer.h>
 
 using namespace lsp;
 using namespace lsp::json;
+
+namespace{
+
+// While set, every allocation of the current thread fails.
+thread_local auto t_refuseAllocations = false;
+
+} // namespace
+
+void* operator new(std::size_t size)
+{
+	if(!t_refuseAllocations)
+		if(auto* const memory = std::malloc(size == 0 ? 1 : size))
+			return memory;
+
+	throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept
+{
+	std::free(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept
+{
+	std::free(memory);
+}
 
 int main(int argc, char** argv)
 {
@@ -543,6 +571,30 @@ int main(int argc, char** argv)
 		{"TruncatedTwice",      {"\xE2\x82\xE2\x82",   "\xEF\xBF\xBD\xEF\xBF\xBD"}},
 		{"TruncatedSurrogate",  {"\xED\xA0",           "\xEF\xBF\xBD"}},
 		{"BeforeEscapes",       {"\x80\"\n\xC3",       "\xEF\xBF\xBD\\\"\\n\xEF\xBF\xBD"}},
+	});
+
+	app.addTest("ArrayWriter/CloseOutOfMemory", [](){
+		auto writer = Writer();
+		{
+			auto aw = writer.beginArray();
+			aw.write(0);
+			// Fills the text to its capacity, so the closing bracket needs memory.
+			while(writer.text().size() != writer.text().capacity())
+				aw.write(0);
+			t_refuseAllocations = true;
+		}
+		t_refuseAllocations = false;
+
+		auto thrown = false;
+		try
+		{
+			(void)writer.text();
+		}
+		catch(const std::bad_alloc&)
+		{
+			thrown = true;
+		}
+		test::check(thrown, "the unfinished text is not read");
 	});
 
 	return app.main(argc, argv);
